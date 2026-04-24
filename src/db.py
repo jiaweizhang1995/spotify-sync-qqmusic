@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 
@@ -44,7 +45,23 @@ CREATE TABLE IF NOT EXISTS unmatched_tracks (
     created_at TEXT,
     PRIMARY KEY (spotify_track_id, created_at)
 );
+
+CREATE TABLE IF NOT EXISTS artist_alias_cache (
+    artist_key TEXT PRIMARY KEY,
+    aliases_json TEXT,
+    source TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS playlist_snapshot (
+    spotify_playlist_id TEXT PRIMARY KEY,
+    snapshot_json TEXT,
+    qq_dirid INTEGER,
+    synced_at TEXT
+);
 """
+
+ALIAS_CACHE_TTL_DAYS = 30
 
 
 def utc_now_iso() -> str:
@@ -53,7 +70,9 @@ def utc_now_iso() -> str:
 
 
 def connect(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+    # check_same_thread=False so worker threads (e.g. MusicBrainzClient's
+    # ThreadPoolExecutor) can use the same conn; callers must serialize writes.
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -213,3 +232,126 @@ def insert_unmatched(
             payload,
         )
     return len(payload)
+
+
+# ---------- artist_alias_cache ----------
+
+
+def _artist_key(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def alias_cache_get(
+    conn: sqlite3.Connection,
+    key: str,
+    ttl_days: int = ALIAS_CACHE_TTL_DAYS,
+) -> list[str] | None:
+    """Return cached aliases for `key` or None on miss / expiry."""
+    norm = _artist_key(key)
+    cur = conn.execute(
+        "SELECT aliases_json, updated_at FROM artist_alias_cache WHERE artist_key = ?",
+        (norm,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    updated_at = row["updated_at"]
+    if updated_at:
+        try:
+            ts = datetime.strptime(updated_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            ts = None
+        if ts is not None and datetime.now(timezone.utc) - ts > timedelta(days=ttl_days):
+            return None
+    try:
+        aliases = json.loads(row["aliases_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(aliases, list):
+        return None
+    return [str(a) for a in aliases]
+
+
+def alias_cache_put(
+    conn: sqlite3.Connection,
+    key: str,
+    aliases: list[str],
+    source: str,
+) -> None:
+    norm = _artist_key(key)
+    payload = json.dumps(list(aliases), ensure_ascii=False)
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO artist_alias_cache
+              (artist_key, aliases_json, source, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (norm, payload, source, utc_now_iso()),
+        )
+
+
+# ---------- playlist_snapshot ----------
+
+
+def snapshot_get(
+    conn: sqlite3.Connection, spotify_playlist_id: str
+) -> dict[str, Any] | None:
+    """Return parsed snapshot dict or None on miss / malformed payload.
+
+    Shape: {"spotify_track_ids": [...], "qq_playlist_id": int,
+            "qq_dirid": int, "synced_at": "..."}.
+    """
+    cur = conn.execute(
+        "SELECT snapshot_json, qq_dirid, synced_at FROM playlist_snapshot "
+        "WHERE spotify_playlist_id = ?",
+        (spotify_playlist_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["snapshot_json"])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    ids = payload.get("spotify_track_ids")
+    if not isinstance(ids, list):
+        return None
+    payload["spotify_track_ids"] = [str(x) for x in ids]
+    payload["qq_dirid"] = row["qq_dirid"]
+    payload["synced_at"] = row["synced_at"]
+    return payload
+
+
+def snapshot_put(
+    conn: sqlite3.Connection,
+    spotify_playlist_id: str,
+    track_ids: Iterable[str],
+    qq_dirid: int,
+) -> None:
+    ids = [str(t) for t in track_ids]
+    payload = json.dumps(
+        {"spotify_track_ids": ids, "qq_playlist_id": qq_dirid},
+        ensure_ascii=False,
+    )
+    with conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO playlist_snapshot
+              (spotify_playlist_id, snapshot_json, qq_dirid, synced_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (spotify_playlist_id, payload, qq_dirid, utc_now_iso()),
+        )
+
+
+def snapshot_clear(conn: sqlite3.Connection, spotify_playlist_id: str) -> None:
+    with conn:
+        conn.execute(
+            "DELETE FROM playlist_snapshot WHERE spotify_playlist_id = ?",
+            (spotify_playlist_id,),
+        )

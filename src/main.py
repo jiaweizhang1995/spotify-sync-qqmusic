@@ -22,7 +22,7 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     from .sync_service import run_sync
 
     cfg = load_config()
-    return run_sync(cfg, dry_run=bool(args.dry_run))
+    return run_sync(cfg, dry_run=bool(args.dry_run), full=bool(args.full))
 
 
 def _run_script(rel_path: str) -> int:
@@ -136,6 +136,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Compute diff but do not mutate the QQ playlist.",
+    )
+    p_sync.add_argument(
+        "--full",
+        action="store_true",
+        help="Full re-sync: ignore incremental snapshot and search every track.",
     )
     p_sync.set_defaults(func=_cmd_sync)
 

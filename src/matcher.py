@@ -123,8 +123,10 @@ def _get_duration_ms(track: Any) -> int | None:
                 v = int(track[k])
             except (TypeError, ValueError):
                 continue
-            # QQ often exposes seconds under `interval`; convert.
-            if k == "interval" and v < 10000:
+            # QQ exposes seconds under `interval` (raw API) and also under
+            # `duration` (our normalized surface via qqmusic_client). Anything
+            # under 10_000 is assumed to be seconds and converted to ms.
+            if k in ("interval", "duration") and v < 10000:
                 v *= 1000
             return v
     return None
@@ -143,7 +145,7 @@ def score_candidate(sp_track: dict, qq_cand: dict) -> tuple[float, str]:
     sp_title_n = normalize_title(sp_track.get("name") or sp_track.get("title") or "")
     qq_title_n = normalize_title(qq_cand.get("name") or qq_cand.get("title") or "")
     if sp_title_n and sp_title_n == qq_title_n:
-        score += 0.5
+        score += 0.4
         reasons.append("title")
 
     sp_artists = {
@@ -159,13 +161,13 @@ def score_candidate(sp_track: dict, qq_cand: dict) -> tuple[float, str]:
     sp_artists.discard("")
     qq_artists.discard("")
     if sp_artists and qq_artists and (sp_artists & qq_artists):
-        score += 0.3
+        score += 0.2
         reasons.append("artist")
 
     sp_dur = _get_duration_ms(sp_track)
     qq_dur = _get_duration_ms(qq_cand)
     if sp_dur is not None and qq_dur is not None and abs(sp_dur - qq_dur) <= 3000:
-        score += 0.2
+        score += 0.4
         reasons.append("duration")
 
     method = "+".join(reasons) if reasons else "none"

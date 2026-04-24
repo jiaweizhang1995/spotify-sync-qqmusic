@@ -27,7 +27,14 @@ class TestInit(unittest.TestCase):
         ).fetchall()
         names = {r["name"] for r in rows}
         self.assertEqual(
-            names, {"track_map_cache", "sync_runs", "unmatched_tracks"}
+            names,
+            {
+                "track_map_cache",
+                "sync_runs",
+                "unmatched_tracks",
+                "artist_alias_cache",
+                "playlist_snapshot",
+            },
         )
 
     def test_init_is_idempotent(self):

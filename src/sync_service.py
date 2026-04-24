@@ -21,10 +21,12 @@ def _log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
 
 from . import db as dbm
+from . import incremental
 from . import report
 from .config import Config
 from .diff_engine import compute_mirror_diff, safety_check
-from .matcher import normalize_artist, normalize_title, pick_best
+from .matcher import normalize_artist, normalize_title, pick_best, score_candidate
+from .musicbrainz_client import MusicBrainzClient
 from .qqmusic_client import (
     QQClient,
     dump_credential,
@@ -102,8 +104,65 @@ def _qq_pair_from_cache(row: Any) -> tuple[int, int] | None:
     return (int(song_id), int(song_type))
 
 
-def run_sync(cfg: Config, dry_run: bool = False) -> int:
-    """Execute one sync run. Returns 0 on success, non-zero on failure."""
+def _match_with_aliases(
+    track: dict[str, Any],
+    primary_candidates: list[dict[str, Any]],
+    aliases: list[str],
+    qq: QQClient,
+    log_prefix: str,
+) -> tuple[dict[str, Any] | None, float, str]:
+    """Try the primary search first; if < 0.8, retry with each alias.
+
+    Picks the single best candidate across all search variants. Logs alias
+    retries for later forensics. Alias set always starts with the primary
+    artist so we don't double-search.
+    """
+    best, best_score, best_method = pick_best(track, primary_candidates, threshold=0.8)
+    if best is not None and best_score >= 0.8:
+        return best, best_score, best_method
+
+    title = track.get("title") or track.get("name") or ""
+    primary_artist = _primary_artist(track)
+
+    # Track the best overall hit across primary + alias queries.
+    overall_cand = best
+    overall_score = best_score
+    overall_method = best_method
+
+    for alias in aliases or []:
+        alias = (alias or "").strip()
+        if not alias or alias == primary_artist:
+            continue
+        query = f"{title} {alias}".strip()
+        _log(f"    [alias retry] {query!r}")
+        try:
+            alt_cands = qq.search_song(query, num=10)
+        except Exception as exc:  # pragma: no cover — defensive
+            _log(f"    [alias retry] search failed for {alias!r}: {exc}")
+            continue
+
+        # Score each alt candidate against the ORIGINAL spotify track (so the
+        # primary-artist set is still what grounds scoring).
+        for cand in alt_cands:
+            score, method = score_candidate(track, cand)
+            if score > overall_score:
+                overall_score = score
+                overall_method = f"alias:{alias}|{method}"
+                overall_cand = cand
+                if score >= 1.0:
+                    return overall_cand, overall_score, overall_method
+
+    if overall_cand is None or overall_score < 0.8:
+        return None, overall_score, overall_method
+    return overall_cand, overall_score, overall_method
+
+
+def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
+    """Execute one sync run. Returns 0 on success, non-zero on failure.
+
+    `full=True` bypasses the incremental snapshot so every Spotify track is
+    re-searched (useful after cache drift or manual QQ edits).
+    """
     os.makedirs(os.path.dirname(os.path.abspath(cfg.db_path)) or ".", exist_ok=True)
 
     conn = dbm.connect(cfg.db_path)
@@ -119,7 +178,8 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
 
     t_start = time.time()
     try:
-        _log(f"[1/9] fetching Spotify playlist {cfg.spotify_playlist_name!r}...")
+        mode = "full" if full else "incremental"
+        _log(f"[1/9] fetching Spotify playlist {cfg.spotify_playlist_name!r} (mode={mode})...")
         sp = SpotifyClient(
             cfg.spotify_client_id,
             cfg.spotify_client_secret,
@@ -130,9 +190,11 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
             raise RuntimeError(
                 f"Spotify playlist not found: {cfg.spotify_playlist_name!r}"
             )
-        sp_tracks = sp.get_playlist_tracks(sp_playlist["id"])
+        spotify_playlist_id = str(sp_playlist["id"])
+        sp_tracks = sp.get_playlist_tracks(spotify_playlist_id)
         _log(f"      -> {len(sp_tracks)} tracks")
         notes_parts.append(f"spotify_count={len(sp_tracks)}")
+        notes_parts.append(f"mode={mode}")
 
         _log("[2/9] refreshing QQ credential...")
         credential = load_credential(cfg.qq_credential_json)
@@ -155,35 +217,58 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
         _log(f"      -> dirid={dirid}, current {len(qq_current)} songs")
         notes_parts.append(f"qq_count={len(qq_current)}")
 
-        _log(f"[4/9] matching {len(sp_tracks)} Spotify tracks against QQ...")
-        sp_ids = [t["id"] for t in sp_tracks if t.get("id")]
-        cached_rows = dbm.cache_get_many(conn, sp_ids)
-        matched: list[tuple[dict[str, Any], tuple[int, int]]] = []
+        _log(f"[4/9] building incremental plan (full={full})...")
+        plan = incremental.build_plan(
+            conn, spotify_playlist_id, sp_tracks, dirid, full
+        )
+        _log(
+            f"      -> to_search {len(plan.to_search)}, reused {len(plan.reused_matched)}, "
+            f"snapshot-removed {len(plan.to_remove_from_qq)}"
+        )
+        notes_parts.append(
+            f"incremental: search={len(plan.to_search)} reused={len(plan.reused_matched)} "
+            f"snap_del={len(plan.to_remove_from_qq)}"
+        )
+
+        # Pre-warm MB alias cache for artists we are about to search. Batch
+        # resolves names in parallel behind a global 1 req/s wire limiter.
+        alias_map: dict[str, list[str]] = {}
+        if plan.to_search:
+            alias_inputs = [
+                {
+                    "artist": _primary_artist(t),
+                    "isrc": t.get("isrc"),
+                }
+                for t in plan.to_search
+                if _primary_artist(t)
+            ]
+            unique_artists = len({a["artist"] for a in alias_inputs})
+            _log(
+                f"[MB] pre-fetching aliases for {unique_artists} artists "
+                f"(UA={cfg.musicbrainz_user_agent!r})"
+            )
+            try:
+                mb_client = MusicBrainzClient(
+                    cfg.musicbrainz_user_agent, conn
+                )
+                alias_map = mb_client.get_aliases_batch(alias_inputs)
+            except Exception as exc:  # pragma: no cover — MB should degrade gracefully
+                _log(f"[MB] pre-fetch failed ({exc}); continuing without aliases")
+                alias_map = {}
+
+        _log(f"[5/9] matching {len(plan.to_search)} track(s) against QQ...")
+        matched: list[tuple[dict[str, Any], tuple[int, int]]] = list(plan.reused_matched)
         unmatched_rows: list[dict[str, Any]] = []
-        total = len(sp_tracks)
-        hit_cache = 0
+        total = len(plan.to_search)
         searched = 0
 
-        for idx, track in enumerate(sp_tracks, 1):
+        for idx, track in enumerate(plan.to_search, 1):
             sp_id = track.get("id")
             short = f"{track.get('title','')[:40]} — {_primary_artist(track)[:20]}"
             if not sp_id:
                 skipped_count += 1
                 _log(f"  [{idx}/{total}] SKIP (no id): {short}")
                 continue
-
-            cached = cached_rows.get(sp_id)
-            if cached is not None:
-                pair = _qq_pair_from_cache(cached)
-                if pair is not None:
-                    matched.append((track, pair))
-                    hit_cache += 1
-                    if idx % 25 == 0 or idx == total:
-                        _log(
-                            f"  [{idx}/{total}] cache {hit_cache} / search {searched} / "
-                            f"unmatched {len(unmatched_rows)}"
-                        )
-                    continue
 
             query = _search_query(track)
             searched += 1
@@ -203,7 +288,11 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
                 )
                 continue
 
-            best, score, method = pick_best(track, candidates, threshold=0.8)
+            aliases = alias_map.get(_primary_artist(track), [])
+            best, score, method = _match_with_aliases(
+                track, candidates, aliases, qq, log_prefix=f"[{idx}/{total}]"
+            )
+
             if best is None:
                 _log(
                     f"  [{idx}/{total}] UNMATCHED: {short} "
@@ -239,41 +328,50 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
             matched.append((track, (int(song_id), int(song_type))))
             if idx % 10 == 0 or idx == total:
                 _log(
-                    f"  [{idx}/{total}] cache {hit_cache} / search {searched} / "
-                    f"unmatched {len(unmatched_rows)}"
+                    f"  [{idx}/{total}] reused {len(plan.reused_matched)} / "
+                    f"searched {searched} / unmatched {len(unmatched_rows)}"
                 )
 
         _log(
-            f"      -> matched {len(matched)}, unmatched {len(unmatched_rows)}, "
-            f"cache-hits {hit_cache}, searches {searched}"
+            f"      -> matched {len(matched)} (reused {len(plan.reused_matched)} + "
+            f"searched {searched - len(unmatched_rows) - failed_count}), "
+            f"unmatched {len(unmatched_rows)}"
         )
 
-        _log("[5/9] computing mirror diff...")
+        _log("[6/9] computing mirror diff...")
         target_qq_ids = {pair[0] for _, pair in matched}
         current_qq_ids = {int(s["id"]) for s in qq_current if s.get("id") is not None}
         diff = compute_mirror_diff(target_qq_ids, current_qq_ids)
         safe, safety_msg = safety_check(diff, len(current_qq_ids), cfg.mirror_delete_threshold)
-        _log(
-            f"      -> add {len(diff['to_add'])}, remove {len(diff['to_remove'])} "
-            f"(safety: {safety_msg})"
-        )
-        notes_parts.append(f"safety={safety_msg}")
 
         to_add_pairs = [pair for _, pair in matched if pair[0] in diff["to_add"]]
-        # For removal we need (id, type) pairs — pull types from qq_current.
+        # For removal we fuse snapshot-driven removals with mirror-diff removals.
         qq_id_to_type = {
             int(s["id"]): int(s.get("type") or 0)
             for s in qq_current
             if s.get("id") is not None
         }
-        to_remove_pairs = [
+        to_remove_pairs: list[tuple[int, int]] = [
             (qid, qq_id_to_type.get(qid, 0)) for qid in diff["to_remove"]
         ]
+        # Snapshot-driven removals land here too — dedupe by qq_song_id.
+        seen_rm_ids = {pair[0] for pair in to_remove_pairs}
+        for pair in plan.to_remove_from_qq:
+            if pair[0] in seen_rm_ids:
+                continue
+            to_remove_pairs.append(pair)
+            seen_rm_ids.add(pair[0])
+
+        _log(
+            f"      -> add {len(to_add_pairs)}, remove {len(to_remove_pairs)} "
+            f"(safety: {safety_msg})"
+        )
+        notes_parts.append(f"safety={safety_msg}")
 
         skipped_count += len(unmatched_rows)
 
         if dry_run:
-            _log("[6/9] DRY RUN — skipping writes")
+            _log("[7/9] DRY RUN — skipping writes")
             notes_parts.append(
                 f"dry_run: would add {len(to_add_pairs)}, remove {len(to_remove_pairs)}"
             )
@@ -281,12 +379,12 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
             removed_count = len(to_remove_pairs)
             status = "dry-run"
         elif not safe:
-            _log("[6/9] ABORT — safety threshold exceeded")
+            _log("[7/9] ABORT — safety threshold exceeded")
             notes_parts.append("aborted: safety threshold exceeded")
             status = "aborted"
         else:
             if to_add_pairs:
-                _log(f"[6/9] adding {len(to_add_pairs)} songs to QQ playlist...")
+                _log(f"[7/9] adding {len(to_add_pairs)} songs to QQ playlist...")
                 ok = qq.add_songs(dirid, to_add_pairs)
                 if ok:
                     added_count = len(to_add_pairs)
@@ -296,7 +394,7 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
                     _log(f"      -> FAILED: add_songs returned non-success")
                     notes_parts.append("add_songs returned non-success")
             if to_remove_pairs:
-                _log(f"[7/9] removing {len(to_remove_pairs)} songs from QQ playlist...")
+                _log(f"      removing {len(to_remove_pairs)} songs from QQ playlist...")
                 ok = qq.del_songs(dirid, to_remove_pairs)
                 if ok:
                     removed_count = len(to_remove_pairs)
@@ -306,6 +404,17 @@ def run_sync(cfg: Config, dry_run: bool = False) -> int:
                     _log(f"      -> FAILED: del_songs returned non-success")
                     notes_parts.append("del_songs returned non-success")
             status = "failed" if failed_count else "success"
+
+            if status == "success":
+                # Persist the current Spotify id set only on a clean apply so
+                # the next incremental run diffs against what actually shipped.
+                try:
+                    incremental.commit_snapshot(
+                        conn, spotify_playlist_id, dirid, sp_tracks
+                    )
+                except Exception as exc:  # pragma: no cover — cache is best-effort
+                    _log(f"      WARN: snapshot commit failed: {exc}")
+                    notes_parts.append(f"snapshot_commit_error: {exc}")
 
         _log(f"[8/9] writing unmatched.txt ({len(unmatched_rows)} rows) + log...")
         dbm.insert_unmatched(conn, unmatched_rows)

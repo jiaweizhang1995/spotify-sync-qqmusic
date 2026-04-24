@@ -146,16 +146,17 @@ FIXTURE = [
         ],
         1401,
     ),
-    # 15. Duration mismatch >3s but title+artist still strong → ≥0.8
+    # 15. Duration within ±3s window — title+artist+duration = full 1.0
     (
         sp("Yesterday", ["The Beatles"], 125000),
-        [qq("Yesterday", ["The Beatles"], 130, song_id=1501)],
+        [qq("Yesterday", ["The Beatles"], 127, song_id=1501)],
         1501,
     ),
-    # 16. Wrong candidate set — only a cover by different artist → should reject
+    # 16. Wrong candidate set — cover by different artist, different length
+    # (Plan A weights: title alone = 0.4, below 0.8 threshold.)
     (
         sp("Wonderwall", ["Oasis"], 258000),
-        [qq("Wonderwall", ["Ryan Adams"], 258, song_id=1601)],
+        [qq("Wonderwall", ["Ryan Adams"], 317, song_id=1601)],
         None,
     ),
     # 17. Only weak title match — different artist + duration → reject
@@ -242,14 +243,30 @@ class TestScore(unittest.TestCase):
             {"name": "A", "artists": [{"name": "X"}]},
             {"name": "A", "singer": [{"name": "Z"}]},
         )
-        self.assertAlmostEqual(s, 0.5)
+        self.assertAlmostEqual(s, 0.4)
 
     def test_title_plus_artist(self):
         s, _ = score_candidate(
             {"name": "A", "artists": [{"name": "X"}]},
             {"name": "A", "singer": [{"name": "X"}]},
         )
+        self.assertAlmostEqual(s, 0.6)
+
+    def test_title_plus_duration(self):
+        # Plan A: title + duration alone is enough to clear 0.8 threshold.
+        s, _ = score_candidate(
+            {"name": "A", "artists": [{"name": "X"}], "duration_ms": 200000},
+            {"name": "A", "singer": [{"name": "Z"}], "interval": 200},
+        )
         self.assertAlmostEqual(s, 0.8)
+
+    def test_duration_only_below_threshold(self):
+        # Plan A safety check: duration alone is 0.4, still filtered.
+        s, _ = score_candidate(
+            {"name": "A", "artists": [{"name": "X"}], "duration_ms": 200000},
+            {"name": "Different", "singer": [{"name": "Z"}], "interval": 200},
+        )
+        self.assertAlmostEqual(s, 0.4)
 
     def test_full_stack(self):
         s, _ = score_candidate(

@@ -1,123 +1,143 @@
-# Spotify → QQ 音乐 每日同步
+# Spotify → QQ 音乐 每日同步 · Daily Sync
 
-每天自动把一个 Spotify 歌单里的新歌同步到 QQ 音乐的同名歌单。单向、只追加、不删歌。
+把 Spotify 歌单单向镜像到 QQ 音乐同名歌单：每天增量跑，跨语种歌手靠 MusicBrainz 兜底。  
+One-way mirror from a Spotify playlist to the same-named QQ Music playlist — runs daily, bridges cross-language artist names via MusicBrainz.
 
-## 它做什么
+## 流程 · Flow
 
-- 每天定时跑一次（默认 UTC 19:00 / 北京 03:00）
-- 读 Spotify 源歌单
-- 在 QQ 音乐里搜同一首歌
-- 把新增的加到 QQ 音乐目标歌单
-- 匹配不上的写到 `data/unmatched.txt`，人工兜底
+```mermaid
+flowchart TD
+    A[Spotify Playlist] -->|Web API| B[Spotify Tracks]
+    B --> C{Snapshot exists?}
+    C -->|Yes| D[Incremental diff]
+    C -->|No / --full| E[Full search set]
+    D --> F[New tracks only]
+    F --> G[MusicBrainz alias lookup<br/>parallel · 1 req/s]
+    E --> G
+    G --> H[QQ Music search<br/>+ alias retry]
+    H --> I[Matcher score ≥ 0.8]
+    I -->|matched| J[add_songs to QQ]
+    I -->|unmatched| K[unmatched.txt]
+    J --> L[Commit snapshot]
+    L --> M[Daily GitHub Actions cron]
+    M --> A
+```
 
-## 需要准备
-
-- Python 3.12+
-- Spotify 开发者账号（拿 Client ID / Secret）
-- QQ 音乐账号（扫码登录）
-
-## 本地跑一次
+## 快速开始 · Setup
 
 ```bash
-# 1. 装依赖
-make install
+make install                # 装依赖 / install deps
+cp .env.example .env        # 复制配置
 
-# 2. 复制配置
-cp .env.example .env
+make bootstrap-spotify      # 一次性 Spotify OAuth，打印 refresh token
+make bootstrap-qq           # 一次性 QQ 扫码登录，打印 QQ_CREDENTIAL_JSON
+# 把上面两个产物写回 .env
 
-# 3. 拿 Spotify refresh token（一次性，会开浏览器）
-make bootstrap-spotify
-# 按提示把 SPOTIFY_CLIENT_ID / SECRET 填进 .env，跑完会打印 refresh token
+python -m src.main playlists -s "源歌单" -q "目标歌单"
+# 或交互式: python -m src.main playlists
+```
 
-# 4. 扫码登录 QQ 音乐（一次性）
-make bootstrap-qq
-# 用手机 QQ 音乐扫终端里的二维码，跑完会打印 QQ_CREDENTIAL_JSON
+- Spotify 开发者应用: https://developer.spotify.com/dashboard — Redirect URI 填 `http://127.0.0.1:8888/callback`
+- 目标歌单不存在会自动新建 QQ 侧 / QQ target playlist is auto-created if missing
 
-# 5. 设置要同步的歌单名（Spotify 和 QQ 两边都要有同名歌单，没有会自动建 QQ 那边）
-python -m src.main playlists
+## 日常 · Daily usage
 
-# 6. 先预览，不写 QQ
-make dry-run
+```bash
+make dry-run                # 预览，不写 QQ / preview only
+make sync                   # 增量同步 / incremental sync (default)
 
-# 7. 真跑
-make sync
+python -m src.main sync --full           # 全量重搜 / bypass snapshot
+python -m src.main sync --full --dry-run # 全量预览
+
+make test                   # 跑测试 / run tests (90+ cases)
 ```
 
 跑完看 `data/sync.log` 和 `data/unmatched.txt`。
+
+## 增量 vs `--full` · Incremental vs Full
+
+| 模式 Mode | 何时用 When |
+|---|---|
+| 增量 (默认) / Incremental | 每日自动跑。只搜 Spotify 新加的歌，删除 Spotify 移除的歌。MB 缓存 30 天。 |
+| `--full` | 缓存漂移、手动改了 QQ 侧、Matcher 调参后想重新评估全量时用。 |
+
+增量靠 `playlist_snapshot` 表记录上次成功同步后的 Spotify track id 集合；下次对比得出 `added / kept / removed`。只有 `added` 走 QQ 搜索 + MB 兜底；`kept` 直接复用 `track_map_cache` 里的 QQ 映射；`removed` 用缓存映射反查 QQ id 直接删。
+
+## MusicBrainz 兜底 · Alias Retry
+
+当 Spotify 用英文名 (Jay Chou) 而 QQ 只收录中文名 (周杰伦) 时，`title+primary_artist` 搜索往往打不到 0.8 分。流程：
+
+1. 批量预取当前需要搜索的歌手别名（`MusicBrainzClient.get_aliases_batch`，全局 1 req/s，30 天 TTL 缓存到 `artist_alias_cache`）。
+2. 主搜索不过阈值时，逐个别名重试 `title+alias`，取全局最高分。
+3. MB 任何失败 (超时/404/429) 都降级成 `[原名]`，不影响同步。
+
+## Matcher 评分 · Scoring
+
+| 特征 Feature | 权重 Weight |
+|---|---|
+| ISRC 完全相等 (强信号) | `1.0` |
+| 标题归一化后相等 | `0.4` |
+| 主艺人命中 (集合交集) | `0.2` |
+| 时长 ±3s | `0.4` |
+
+阈值 `0.8`。`title + duration` (跨语种艺人常见) 刚好过线；仅 `duration` (0.4) 会被过滤。  
+Threshold 0.8. Plan A weights let title + duration alone clear the bar — the common shape when the artist name is cross-language.
 
 ## .env 字段
 
 | 字段 | 说明 |
 |---|---|
-| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify 开发者后台拿 |
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify 开发者后台 |
 | `SPOTIFY_REFRESH_TOKEN` | `bootstrap-spotify` 生成 |
-| `SPOTIFY_PLAYLIST_NAME` | 源歌单名 |
-| `QQ_PLAYLIST_NAME` | 目标歌单名（不存在会新建） |
-| `QQ_CREDENTIAL_JSON` | `bootstrap-qq` 生成 |
-| `MIRROR_DELETE_THRESHOLD` | 镜像模式安全阀（默认 0.2，当前用不到） |
+| `SPOTIFY_PLAYLIST_NAME` / `QQ_PLAYLIST_NAME` | 源/目标歌单名 |
+| `QQ_CREDENTIAL_JSON` | `bootstrap-qq` 生成 (单行 JSON) |
+| `MIRROR_DELETE_THRESHOLD` | 镜像安全阀 (默认 `0.2`，超出直接 abort) |
+| `MUSICBRAINZ_USER_AGENT` | MB 请求头 UA，默认 `spotify-qq-sync/0.2 (CarfagnoArcino@gmail.com)` |
+| `GH_PAT_SECRETS_WRITE` | 可选，fine-grained PAT，权限 `secrets:write`，给 Actions 自动刷新 `QQ_CREDENTIAL_JSON` 用 |
 
-## 让它每天自己跑（GitHub Actions）
+## GitHub Actions
 
-仓库里已经有 `.github/workflows/sync.yml`。只要把 `.env` 里的值作为 Repository Secrets 配到 GitHub：
+仓库自带 `.github/workflows/sync.yml`。把 `.env` 里的值配成 Repository Secrets 即可：
 
-- `SPOTIFY_CLIENT_ID`
-- `SPOTIFY_CLIENT_SECRET`
-- `SPOTIFY_REFRESH_TOKEN`
-- `SPOTIFY_PLAYLIST_NAME`
-- `QQ_PLAYLIST_NAME`
+- `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` / `SPOTIFY_REFRESH_TOKEN`
+- `SPOTIFY_PLAYLIST_NAME` / `QQ_PLAYLIST_NAME`
 - `QQ_CREDENTIAL_JSON`
-- `GH_PAT_SECRETS_WRITE`（fine-grained PAT，权限 `secrets:write`，用于 QQ musickey 过期时自动写回）
+- `GH_PAT_SECRETS_WRITE` (可选)
 
-配好后每天 UTC 19:00 自动跑，也能在 Actions 页面手点 `Run workflow` 触发（勾选 `dry_run` 可预览）。
+配好后每天 UTC 19:00 (北京 03:00) 自动跑；Actions 页面手点 `Run workflow` 可触发 dry-run 或 full 模式。  
+产物：`data/` 分支自动 commit 回 SQLite + 日志；`sync.log` + `unmatched.txt` 作 30 天 artifact。
 
-运行产物：
-- `data/` 分支：SQLite 库、日志、未匹配清单（自动 commit 回去）
-- Actions artifacts：`sync.log` + `unmatched.txt`（保留 30 天）
+## 常见问题 · Troubleshooting
 
-## 常用命令
+- **QQ 扫码时手机在哪点？** 打开手机 QQ 音乐 → 个人中心 → 扫一扫，而不是手机 QQ。
+- **Spotify redirect_uri 报错？** Spotify 控制台里的 Redirect URI 必须精确等于 `http://127.0.0.1:8888/callback`，末尾不要加斜杠。
+- **`unmatched.txt` 空的？** 好事 — 说明全匹配上了。如果觉得不对，跑一次 `--full` 清缓存重搜。
+- **有首歌没过？** 打开 `data/unmatched.txt`，跨平台 metadata 常年对不上是常态；人工加一下就好。最初版跨目录 83 首漏了的锅主要在这。
+- **QQ 登录态过期？** 重跑 `make bootstrap-qq`，把新 `QQ_CREDENTIAL_JSON` 更新到 `.env` 或 Repository Secret。如果配了 `GH_PAT_SECRETS_WRITE`，Actions 里 musickey 刷新会自动写回。
+- **想重置增量？** 删 `data/sync.db` 里的 `playlist_snapshot` 表，或直接跑 `--full` 一次。
 
-```bash
-make install              # 装依赖
-make bootstrap-spotify    # Spotify 首次授权
-make bootstrap-qq         # QQ 音乐扫码登录
-make dry-run              # 预览不写
-make sync                 # 真同步
-make test                 # 跑测试
-python -m src.main playlists -s "源歌单" -q "目标歌单"   # 改歌单名
-```
-
-## 常见问题
-
-**QQ 登录态过期？**  
-重新跑 `make bootstrap-qq`，把新的 `QQ_CREDENTIAL_JSON` 更新到 `.env`（或 GitHub Secret）。GitHub Actions 里如果配了 `GH_PAT_SECRETS_WRITE`，musickey 刷新会自动写回 Secret。
-
-**有歌没同步过去？**  
-看 `data/unmatched.txt`。跨平台 metadata 对不上是常态，手动加即可。
-
-**不想删歌？**  
-默认就不删（append 模式）。Mirror 模式暂未启用。
-
-## 项目结构
+## 项目结构 · Layout
 
 ```
 src/
-  main.py            # CLI 入口
-  config.py          # 读 .env
-  spotify_client.py  # Spotify API
-  qqmusic_client.py  # QQ 音乐 API（社区库 qqmusic-api-python）
-  matcher.py         # 跨平台歌曲匹配
-  diff_engine.py     # 算差异
-  sync_service.py    # 主流程
-  db.py              # SQLite
-  report.py          # 同步报告
-scripts/
-  bootstrap_spotify.py
-  bootstrap_qq_login.py
-tests/
-data/                # 运行时产物（sync.db / sync.log / unmatched.txt）
+  main.py                # CLI 入口 / CLI entry
+  config.py              # 读 .env
+  spotify_client.py      # Spotify Web API
+  qqmusic_client.py      # qqmusic-api-python 的同步封装
+  musicbrainz_client.py  # MB alias 查询 + 1 req/s 限速 + 30d 缓存
+  matcher.py             # 归一化 + 打分 (Plan A 权重)
+  incremental.py         # Snapshot 增量 plan
+  diff_engine.py         # Mirror diff + 安全阀
+  sync_service.py        # 主流程 orchestrator
+  db.py                  # SQLite schema + DAO
+  report.py              # 同步报告 + 日志
+scripts/                 # bootstrap 脚本
+tests/                   # pytest, 90+ 用例
+data/                    # 运行产物: sync.db / sync.log / unmatched.txt
 ```
 
-## 参考
+## 参考 · References
 
-- Spotify Web API: https://developer.spotify.com/documentation/web-api
-- qqmusic-api-python: https://pypi.org/project/qqmusic-api-python/
+- Spotify Web API — https://developer.spotify.com/documentation/web-api
+- qqmusic-api-python — https://pypi.org/project/qqmusic-api-python/
+- MusicBrainz Web Service — https://musicbrainz.org/doc/MusicBrainz_API

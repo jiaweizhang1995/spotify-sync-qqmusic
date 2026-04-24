@@ -16,6 +16,9 @@ _REQUIRED = (
 )
 
 
+_DEFAULT_MB_USER_AGENT = "spotify-qq-sync/0.2 (CarfagnoArcino@gmail.com)"
+
+
 @dataclass(frozen=True)
 class Config:
     spotify_client_id: str
@@ -29,6 +32,7 @@ class Config:
     db_path: str = "data/sync.db"
     log_path: str = "data/sync.log"
     unmatched_path: str = "data/unmatched.txt"
+    musicbrainz_user_agent: str = _DEFAULT_MB_USER_AGENT
 
 
 def _load_dotenv_if_present() -> None:
@@ -71,4 +75,7 @@ def load_config() -> Config:
         db_path=os.environ.get("DB_PATH", "data/sync.db"),
         log_path=os.environ.get("LOG_PATH", "data/sync.log"),
         unmatched_path=os.environ.get("UNMATCHED_PATH", "data/unmatched.txt"),
+        musicbrainz_user_agent=(
+            os.environ.get("MUSICBRAINZ_USER_AGENT") or _DEFAULT_MB_USER_AGENT
+        ),
     )
