@@ -45,6 +45,12 @@ def _cmd_bootstrap_qq(_args: argparse.Namespace) -> int:
     return _run_script("scripts/bootstrap_qq_login.py")
 
 
+def _cmd_setup(_args: argparse.Namespace) -> int:
+    from .setup_wizard import run
+
+    return run()
+
+
 _ENV_LINE_RE = re.compile(r"^([A-Z_][A-Z0-9_]*)=")
 
 
@@ -144,6 +150,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sync.set_defaults(func=_cmd_sync)
 
+    p_setup = sub.add_parser(
+        "setup",
+        help="交互式向导：一步步配好 .env（Spotify 授权 + QQ 登录 + 歌单名）",
+    )
+    p_setup.set_defaults(func=_cmd_setup)
+
     p_pl = sub.add_parser(
         "playlists",
         help="Set Spotify + QQ playlist names in .env (interactive if omitted).",
@@ -168,9 +180,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .config import ConfigError
+
     parser = build_parser()
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        print(f"\n❌ {exc}\n", file=sys.stderr)
+        print(
+            "💡 想一键配好？跑:\n"
+            "     spotify-sync setup\n"
+            "   会带你一步步填完 Spotify 授权 + QQ 登录 + 歌单名。\n",
+            file=sys.stderr,
+        )
+        return 2
+    except KeyboardInterrupt:
+        print("\n中断。", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

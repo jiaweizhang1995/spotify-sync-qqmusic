@@ -66,16 +66,22 @@ class SpotifyClient:
             return resp.json()
         raise RuntimeError("exhausted retries")
 
-    def find_playlist_by_name(self, name: str) -> dict[str, Any] | None:
+    def list_playlists(self) -> list[dict[str, Any]]:
+        """Return the user's Spotify playlists (paginated through `next`)."""
+        out: list[dict[str, Any]] = []
         url: str | None = f"{API_BASE}/me/playlists"
         params: dict[str, Any] | None = {"limit": 50}
         while url:
             body = self._get(url, params=params)
-            for pl in body.get("items", []):
-                if pl.get("name") == name:
-                    return pl
+            out.extend(body.get("items", []))
             url = body.get("next")
             params = None
+        return out
+
+    def find_playlist_by_name(self, name: str) -> dict[str, Any] | None:
+        for pl in self.list_playlists():
+            if pl.get("name") == name:
+                return pl
         return None
 
     def get_playlist_tracks(self, playlist_id: str) -> list[dict[str, Any]]:

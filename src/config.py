@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 _REQUIRED = (
@@ -17,6 +18,22 @@ _REQUIRED = (
 
 
 _DEFAULT_MB_USER_AGENT = "spotify-qq-sync/0.2 (CarfagnoArcino@gmail.com)"
+
+
+class ConfigError(RuntimeError):
+    """Friendly configuration error shown to the user without a traceback."""
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _anchor(path: str) -> str:
+    """Make a path absolute by anchoring it to the project root if relative."""
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    return str(_project_root() / p)
 
 
 @dataclass(frozen=True)
@@ -36,14 +53,15 @@ class Config:
 
 
 def _load_dotenv_if_present() -> None:
-    """Attempt to load `.env` via python-dotenv; silently skip if unavailable."""
-    if not os.path.exists(".env"):
+    """Load `.env` from project root, not cwd. Silently skip if absent."""
+    env_path = _project_root() / ".env"
+    if not env_path.exists():
         return
     try:
         from dotenv import load_dotenv  # type: ignore
     except ImportError:
         return
-    load_dotenv(".env", override=False)
+    load_dotenv(str(env_path), override=False)
 
 
 def load_config() -> Config:
@@ -51,16 +69,25 @@ def load_config() -> Config:
 
     missing = [name for name in _REQUIRED if not os.environ.get(name)]
     if missing:
-        raise RuntimeError(
-            "Missing required environment variables: " + ", ".join(missing)
-        )
+        env_path = _project_root() / ".env"
+        msg_lines = [
+            "缺少必填的配置项 / Missing required config:",
+            *[f"  - {name}" for name in missing],
+            "",
+            f"检查 {env_path} 是否写好，或在环境变量里设置上述项。",
+            "Check that the file above has all of the keys set, or export them as env vars.",
+            "",
+            "第一次用请看 README 的 Setup 段：",
+            "  https://github.com/jiaweizhang1995/spotify-sync-qqmusic#快速开始--setup",
+        ]
+        raise ConfigError("\n".join(msg_lines))
 
     threshold_raw = os.environ.get("MIRROR_DELETE_THRESHOLD", "0.2")
     try:
         threshold = float(threshold_raw)
     except ValueError as exc:
-        raise RuntimeError(
-            f"MIRROR_DELETE_THRESHOLD must be a float, got {threshold_raw!r}"
+        raise ConfigError(
+            f"MIRROR_DELETE_THRESHOLD 必须是小数，现在是 {threshold_raw!r}"
         ) from exc
 
     return Config(
@@ -72,9 +99,9 @@ def load_config() -> Config:
         qq_credential_json=os.environ["QQ_CREDENTIAL_JSON"],
         gh_pat_secrets_write=os.environ.get("GH_PAT_SECRETS_WRITE") or None,
         mirror_delete_threshold=threshold,
-        db_path=os.environ.get("DB_PATH", "data/sync.db"),
-        log_path=os.environ.get("LOG_PATH", "data/sync.log"),
-        unmatched_path=os.environ.get("UNMATCHED_PATH", "data/unmatched.txt"),
+        db_path=_anchor(os.environ.get("DB_PATH", "data/sync.db")),
+        log_path=_anchor(os.environ.get("LOG_PATH", "data/sync.log")),
+        unmatched_path=_anchor(os.environ.get("UNMATCHED_PATH", "data/unmatched.txt")),
         musicbrainz_user_agent=(
             os.environ.get("MUSICBRAINZ_USER_AGENT") or _DEFAULT_MB_USER_AGENT
         ),
