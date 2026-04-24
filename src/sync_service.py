@@ -26,6 +26,7 @@ from . import report
 from .config import Config
 from .diff_engine import compute_mirror_diff, safety_check
 from .matcher import normalize_artist, normalize_title, pick_best, score_candidate
+from .text_util import explain_method
 from .qqmusic_client import (
     QQClient,
     dump_credential,
@@ -128,11 +129,13 @@ def _match_title_only_fallback(
         return None, overall_score, overall_method
 
     query = title
-    _log(f"    [title-only] {query!r}")
+    _log(
+        f"      ↻ 主搜索弱 (最高 {int(overall_score * 100)}%)，回退到仅搜标题: {query!r}"
+    )
     try:
         alt_cands = qq.search_song(query, num=10)
     except Exception as exc:  # pragma: no cover — defensive
-        _log(f"    [title-only] search failed: {exc}")
+        _log(f"      ↻ title-only 搜索失败: {exc}")
         return (None if overall_score < 0.8 else overall_cand), overall_score, overall_method
 
     for cand in alt_cands:
@@ -230,10 +233,12 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
 
         for idx, track in enumerate(plan.to_search, 1):
             sp_id = track.get("id")
-            short = f"{track.get('title','')[:40]} — {_primary_artist(track)[:20]}"
+            sp_title = track.get("title", "")
+            sp_artist = _primary_artist(track)
+            short = f"{sp_title[:40]} — {sp_artist[:20]}"
             if not sp_id:
                 skipped_count += 1
-                _log(f"  [{idx}/{total}] SKIP (no id): {short}")
+                _log(f"  [{idx}/{total}] ⚠ 跳过（没 Spotify id）: {short}")
                 continue
 
             query = _search_query(track)
@@ -242,12 +247,12 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 candidates = qq.search_song(query, num=10)
             except Exception as exc:  # pragma: no cover — defensive
                 failed_count += 1
-                _log(f"  [{idx}/{total}] FAIL search: {short} ({exc})")
+                _log(f"  [{idx}/{total}] ✗ QQ 搜索出错: {short} ({exc})")
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
-                        "title": track.get("title", ""),
-                        "artist": _primary_artist(track),
+                        "title": sp_title,
+                        "artist": sp_artist,
                         "album": track.get("album", ""),
                         "reason": f"search error: {exc}",
                     }
@@ -255,19 +260,21 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 continue
 
             best, score, method = _match_title_only_fallback(track, candidates, qq)
+            pct = int(round(score * 100))
+            reason_cn = explain_method(method)
 
             if best is None:
                 _log(
-                    f"  [{idx}/{total}] UNMATCHED: {short} "
-                    f"(best={score:.2f}/{method})"
+                    f"  [{idx}/{total}] ✗ 找不到: {short}  "
+                    f"(最佳候选只到 {pct}% — {reason_cn})"
                 )
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
-                        "title": track.get("title", ""),
-                        "artist": _primary_artist(track),
+                        "title": sp_title,
+                        "artist": sp_artist,
                         "album": track.get("album", ""),
-                        "reason": f"no candidate ≥0.8 (best={score:.2f}/{method})",
+                        "reason": f"最佳候选 {pct}% ({reason_cn})",
                     }
                 )
                 continue
@@ -275,30 +282,38 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             song_type = best.get("type")
             song_id = best.get("id")
             if song_id is None or song_type is None:
-                _log(f"  [{idx}/{total}] bad candidate (no id/type): {short}")
+                _log(
+                    f"  [{idx}/{total}] ✗ 候选缺 id/type: {short}"
+                )
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
-                        "title": track.get("title", ""),
-                        "artist": _primary_artist(track),
+                        "title": sp_title,
+                        "artist": sp_artist,
                         "album": track.get("album", ""),
-                        "reason": "matched candidate missing id/type",
+                        "reason": "候选缺 id/type",
                     }
                 )
                 continue
 
+            qq_title = best.get("title", "")
+            qq_artist = (best.get("artists") or [""])[0]
             dbm.cache_put(conn, _cache_row_for(track, best, score, method))
             matched.append((track, (int(song_id), int(song_type))))
-            if idx % 10 == 0 or idx == total:
+            _log(
+                f"  [{idx}/{total}] ✓ 匹配: {short}  →  "
+                f"{qq_title[:40]} — {qq_artist[:20]}  "
+                f"({pct}%, {reason_cn})"
+            )
+            if idx % 25 == 0 or idx == total:
                 _log(
-                    f"  [{idx}/{total}] reused {len(plan.reused_matched)} / "
-                    f"searched {searched} / unmatched {len(unmatched_rows)}"
+                    f"        进度: 复用 {len(plan.reused_matched)} / 搜索 {searched} / "
+                    f"匹配 {len(matched) - len(plan.reused_matched)} / 未匹配 {len(unmatched_rows)}"
                 )
 
         _log(
-            f"      -> matched {len(matched)} (reused {len(plan.reused_matched)} + "
-            f"searched {searched - len(unmatched_rows) - failed_count}), "
-            f"unmatched {len(unmatched_rows)}"
+            f"      小结: 共匹配 {len(matched)} 首 (复用缓存 {len(plan.reused_matched)} + "
+            f"本次搜到 {searched - len(unmatched_rows) - failed_count}), 未匹配 {len(unmatched_rows)}"
         )
 
         _log("[6/9] computing mirror diff...")

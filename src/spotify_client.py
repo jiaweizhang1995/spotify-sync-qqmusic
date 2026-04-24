@@ -7,6 +7,8 @@ from typing import Any
 
 import requests
 
+from .text_util import to_simplified
+
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 API_BASE = "https://api.spotify.com/v1"
 PLAYLIST_ITEM_FIELDS = (
@@ -96,12 +98,16 @@ class SpotifyClient:
 
 
 def _normalize_track(track: dict[str, Any]) -> dict[str, Any]:
-    artists = [a.get("name", "") for a in track.get("artists", []) if a]
-    album = (track.get("album") or {}).get("name", "")
+    # Traditional → Simplified so search queries match QQ's mainland catalog.
+    artists = [
+        to_simplified(a.get("name", "")) for a in track.get("artists", []) if a
+    ]
+    album = to_simplified((track.get("album") or {}).get("name", ""))
+    title = to_simplified(track.get("name", ""))
     isrc = (track.get("external_ids") or {}).get("isrc")
     return {
         "id": track.get("id"),
-        "title": track.get("name", ""),
+        "title": title,
         "artists": artists,
         "album": album,
         "duration_ms": track.get("duration_ms", 0),

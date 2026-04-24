@@ -773,6 +773,7 @@ dependencies = [
     { name = "qqmusic-api-python" },
     { name = "qrcode" },
     { name = "requests" },
+    { name = "zhconv" },
     { name = "zxing-cpp" },
 ]
 
@@ -789,6 +790,7 @@ requires-dist = [
     { name = "qqmusic-api-python", specifier = ">=0.5.2" },
     { name = "qrcode", specifier = ">=7.4" },
     { name = "requests", specifier = ">=2.31" },
+    { name = "zhconv", specifier = ">=1.4" },
     { name = "zxing-cpp", specifier = ">=2.2" },
 ]
 
@@ -862,6 +864,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584, upload-time = "2026-01-07T16:24:42.685Z" },
 ]
+
+[[package]]
+name = "zhconv"
+version = "1.4.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/25/47/c8ae2d5d4025e253211ff3d8c163f457db1da94976cb582337a5ab76cb87/zhconv-1.4.3.tar.gz", hash = "sha256:ad42d9057ca0605f8e41d62b67ca797f879f58193ee6840562c51459b2698c45", size = 211571, upload-time = "2021-10-31T05:59:44.096Z" }
 
 [[package]]
 name = "zxing-cpp"

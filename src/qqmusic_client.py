@@ -14,6 +14,8 @@ from typing import Any
 from qqmusic_api import Client, Credential
 from qqmusic_api.modules.search import SearchType
 
+from .text_util import to_simplified
+
 BATCH_SIZE = 30
 
 
@@ -127,8 +129,8 @@ class QQClient:
                             {
                                 "id": song.id,
                                 "mid": song.mid,
-                                "title": song.title or song.name,
-                                "artists": [s.name for s in song.singer],
+                                "title": to_simplified(song.title or song.name),
+                                "artists": [to_simplified(s.name) for s in song.singer],
                                 "duration": song.interval,
                                 "type": song.type,
                             }
@@ -155,9 +157,9 @@ class QQClient:
                     {
                         "id": song.id,
                         "mid": song.mid,
-                        "title": song.title or song.name,
-                        "artists": [s.name for s in song.singer],
-                        "album": song.album.name if song.album else "",
+                        "title": to_simplified(song.title or song.name),
+                        "artists": [to_simplified(s.name) for s in song.singer],
+                        "album": to_simplified(song.album.name) if song.album else "",
                         "duration": song.interval,
                         "type": song.type,
                     }
