@@ -1,0 +1,102 @@
+name: Daily sync
+
+on:
+  schedule:
+    # 19:00 UTC = 03:00 Asia/Shanghai
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview without mutating QQ playlist"
+        type: boolean
+        default: false
+
+concurrency:
+  group: spotify-qq-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout data branch (fallback to default)
+        uses: actions/checkout@v4
+        with:
+          ref: data
+          fetch-depth: 0
+          persist-credentials: true
+        continue-on-error: true
+        id: checkout_data
+
+      - name: Fallback checkout (main)
+        if: steps.checkout_data.outcome != 'success'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Ensure data branch exists locally
+        run: |
+          set -e
+          if ! git rev-parse --verify data >/dev/null 2>&1; then
+            git checkout -b data
+          else
+            git checkout data
+          fi
+          mkdir -p data
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+          SPOTIFY_PLAYLIST_NAME: ${{ secrets.SPOTIFY_PLAYLIST_NAME }}
+          QQ_PLAYLIST_NAME: ${{ secrets.QQ_PLAYLIST_NAME }}
+          QQ_CREDENTIAL_JSON: ${{ secrets.QQ_CREDENTIAL_JSON }}
+          GH_PAT_SECRETS_WRITE: ${{ secrets.GH_PAT_SECRETS_WRITE }}
+          GH_TOKEN: ${{ secrets.GH_PAT_SECRETS_WRITE }}
+          MIRROR_DELETE_THRESHOLD: ${{ vars.MIRROR_DELETE_THRESHOLD }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python -m src.main sync --dry-run
+          else
+            python -m src.main sync
+          fi
+
+      - name: Commit data/ changes
+        if: success() && inputs.dry_run != true
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then
+            echo "No data/ changes to commit."
+          else
+            git commit -m "sync: update data/ [$(date -u +%Y-%m-%dT%H:%M:%SZ)]"
+            git push origin data
+          fi
+
+      - name: Upload run artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-run-${{ github.run_id }}
+          path: |
+            data/sync.log
+            data/unmatched.txt
+          if-no-files-found: ignore
+          retention-days: 30

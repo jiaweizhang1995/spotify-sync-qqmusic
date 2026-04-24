@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.log
+data/*.txt
