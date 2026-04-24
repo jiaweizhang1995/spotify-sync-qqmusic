@@ -1,7 +1,0 @@
-requests>=2.31
-qqmusic-api-python>=0.5.2
-python-dotenv>=1.0
-anyio>=4.0
-qrcode>=7.4
-Pillow>=10.0
-zxing-cpp>=2.2

@@ -1,19 +1,25 @@
-.PHONY: install sync dry-run test bootstrap-spotify bootstrap-qq
+.PHONY: install lock sync dry-run full test bootstrap-spotify bootstrap-qq
 
 install:
-	pip install -r requirements.txt
+	uv sync
+
+lock:
+	uv lock
 
 sync:
-	python -m src.main sync
+	uv run spotify-sync sync
 
 dry-run:
-	python -m src.main sync --dry-run
+	uv run spotify-sync sync --dry-run
+
+full:
+	uv run spotify-sync sync --full
 
 test:
-	python -m pytest tests/ -q
+	uv run pytest tests/ -q
 
 bootstrap-spotify:
-	python -m src.main bootstrap-spotify
+	uv run spotify-sync bootstrap-spotify
 
 bootstrap-qq:
-	python -m src.main bootstrap-qq
+	uv run spotify-sync bootstrap-qq

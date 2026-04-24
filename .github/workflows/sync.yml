@@ -49,14 +49,13 @@ jobs:
           fi
           mkdir -p data
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: "3.12"
-          cache: pip
+          enable-cache: true
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install deps (locked)
+        run: uv sync --frozen
 
       - name: Run sync
         env:
@@ -71,9 +70,9 @@ jobs:
           MIRROR_DELETE_THRESHOLD: ${{ vars.MIRROR_DELETE_THRESHOLD }}
         run: |
           if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python -m src.main sync --dry-run
+            uv run spotify-sync sync --dry-run
           else
-            python -m src.main sync
+            uv run spotify-sync sync
           fi
 
       - name: Commit data/ changes

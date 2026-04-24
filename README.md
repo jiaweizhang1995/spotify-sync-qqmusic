@@ -26,32 +26,73 @@ flowchart TD
     O --> A
 ```
 
+## 先装 uv · Install uv
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh     # macOS / Linux
+# or: brew install uv
+```
+
+uv 用 `pyproject.toml` + `uv.lock` 管依赖。两份文件都在 repo 里，版本完全一致。
+
 ## 快速开始 · Setup
 
 ```bash
-make install                # 装依赖 / install deps
+git clone https://github.com/jiaweizhang1995/spotify-sync-qqmusic.git
+cd spotify-sync-qqmusic
+
+make install                # uv sync — 建 .venv + 按 lockfile 装依赖
 cp .env.example .env        # 复制配置
 
 make bootstrap-spotify      # 一次性 Spotify OAuth，打印 refresh token
 make bootstrap-qq           # 一次性 QQ 扫码登录（手机 QQ 扫），打印 QQ_CREDENTIAL_JSON
 # 把上面两个产物写回 .env
 
-spotify-sync playlists -s "源歌单" -q "目标歌单"
-# 或交互式: spotify-sync playlists
+uv run spotify-sync playlists -s "源歌单" -q "目标歌单"
+# 或交互式: uv run spotify-sync playlists
 ```
 
 - Spotify 开发者应用: https://developer.spotify.com/dashboard — Redirect URI 必须 **精确** 填 `http://127.0.0.1:8765/callback`
 - 目标歌单不存在会自动新建 QQ 侧 / QQ target playlist is auto-created if missing
 
-## 日常 · Daily usage
+### 可选：装 shell wrapper · Optional shell wrapper
+
+把 `spotify-sync` 做成全局命令（不用 `uv run` 前缀）：
 
 ```bash
-spotify-sync                    # 默认 = sync (增量)
-spotify-sync sync --dry-run     # 预览，不写 QQ
-spotify-sync sync --full        # 全量重搜，绕过 snapshot
-spotify-sync sync --full --dry-run
+cat > ~/.local/bin/spotify-sync <<'EOF'
+#!/usr/bin/env bash
+set -e
+PROJECT_DIR="<absolute path to this repo>"
+if [ $# -eq 0 ]; then
+  exec uv run --project "$PROJECT_DIR" spotify-sync sync
+else
+  exec uv run --project "$PROJECT_DIR" spotify-sync "$@"
+fi
+EOF
+chmod +x ~/.local/bin/spotify-sync
+```
 
-make test                       # 跑测试 / 94 cases
+之后终端任意目录敲 `spotify-sync` 就跑。
+
+## 日常 · Daily usage
+
+装了 wrapper 后：
+
+```bash
+spotify-sync                       # 默认 = sync (增量)
+spotify-sync sync --dry-run        # 预览，不写 QQ
+spotify-sync sync --full           # 全量重搜，绕过 snapshot
+spotify-sync sync --full --dry-run
+```
+
+没装 wrapper 时全用 `uv run`：
+
+```bash
+uv run spotify-sync                 # 同上
+uv run spotify-sync sync --dry-run
+uv run pytest tests/ -q             # 跑测试 / 94 cases
+make test                           # 快捷方式
 ```
 
 跑完看 `data/sync.log` 和 `data/unmatched.txt`。
@@ -107,6 +148,7 @@ Primary search is `title + artist`. On miss (<0.8), retry with just `title`; QQ'
 - `GH_PAT_SECRETS_WRITE`（可选）
 
 配好后每天 UTC 19:00（北京 03:00）自动跑；Actions 页面手点 `Run workflow` 可触发 dry-run 或 full 模式。
+CI 使用 `uv sync --frozen` 严格按 `uv.lock` 装依赖 → 本地和线上版本完全一致。
 产物：`data/` 分支自动 commit 回 SQLite + 日志；`sync.log` + `unmatched.txt` 作 30 天 artifact。
 
 ## 常见问题 · Troubleshooting
@@ -121,8 +163,11 @@ Primary search is `title + artist`. On miss (<0.8), retry with just `title`; QQ'
 ## 项目结构 · Layout
 
 ```
+pyproject.toml           # 项目元数据 + 依赖 + entry point
+uv.lock                  # 锁定的依赖版本（committed）
+Makefile                 # make install/sync/test/... 全部走 uv
 src/
-  main.py                # CLI 入口 / CLI entry
+  main.py                # CLI 入口 / CLI entry (spotify-sync 命令指向这里)
   config.py              # 读 .env
   spotify_client.py      # Spotify Web API
   qqmusic_client.py      # qqmusic-api-python 的同步封装
@@ -141,3 +186,4 @@ data/                    # 运行产物: sync.db / sync.log / unmatched.txt
 
 - Spotify Web API — https://developer.spotify.com/documentation/web-api
 - qqmusic-api-python — https://pypi.org/project/qqmusic-api-python/
+- uv — https://docs.astral.sh/uv/
