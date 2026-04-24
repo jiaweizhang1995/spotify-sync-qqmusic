@@ -295,14 +295,9 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 )
                 continue
 
-            qq_title = best.get("title", "")
-            qq_artist = (best.get("artists") or [""])[0]
             dbm.cache_put(conn, _cache_row_for(track, best, score, method))
             matched.append((track, (int(song_id), int(song_type))))
-            _log(f"[{idx}/{total}] ✓ 匹配 ({pct}%)")
-            _log(f"    Spotify: {sp_artist} 《{sp_title}》")
-            _log(f"    QQ:      {qq_artist} 《{qq_title}》")
-            _log(f"    依据:    {reason_cn}")
+            # 成功不打 per-track log，只周期性打进度。
             if idx % 25 == 0 or idx == total:
                 _log(
                     f"—— 进度 {idx}/{total} —— 复用 {len(plan.reused_matched)} / "
