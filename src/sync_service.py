@@ -129,13 +129,12 @@ def _match_title_only_fallback(
         return None, overall_score, overall_method
 
     query = title
-    _log(
-        f"      ↻ 主搜索弱 (最高 {int(overall_score * 100)}%)，回退到仅搜标题: {query!r}"
-    )
+    _log(f"    ↻ 主搜索弱（最高 {int(overall_score * 100)}%），回退仅搜标题")
+    _log(f"    ↻ 搜索词: {query!r}")
     try:
         alt_cands = qq.search_song(query, num=10)
     except Exception as exc:  # pragma: no cover — defensive
-        _log(f"      ↻ title-only 搜索失败: {exc}")
+        _log(f"    ↻ title-only 搜索失败: {exc}")
         return (None if overall_score < 0.8 else overall_cand), overall_score, overall_method
 
     for cand in alt_cands:
@@ -235,10 +234,10 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             sp_id = track.get("id")
             sp_title = track.get("title", "")
             sp_artist = _primary_artist(track)
-            short = f"{sp_title[:40]} — {sp_artist[:20]}"
             if not sp_id:
                 skipped_count += 1
-                _log(f"  [{idx}/{total}] ⚠ 跳过（没 Spotify id）: {short}")
+                _log(f"[{idx}/{total}] ⚠ 跳过（没 Spotify id）")
+                _log(f"    Spotify: {sp_artist} 《{sp_title}》")
                 continue
 
             query = _search_query(track)
@@ -247,7 +246,9 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 candidates = qq.search_song(query, num=10)
             except Exception as exc:  # pragma: no cover — defensive
                 failed_count += 1
-                _log(f"  [{idx}/{total}] ✗ QQ 搜索出错: {short} ({exc})")
+                _log(f"[{idx}/{total}] ✗ QQ 搜索出错")
+                _log(f"    Spotify: {sp_artist} 《{sp_title}》")
+                _log(f"    错误:    {exc}")
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
@@ -264,10 +265,9 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             reason_cn = explain_method(method)
 
             if best is None:
-                _log(
-                    f"  [{idx}/{total}] ✗ 找不到: {short}  "
-                    f"(最佳候选只到 {pct}% — {reason_cn})"
-                )
+                _log(f"[{idx}/{total}] ✗ 找不到")
+                _log(f"    Spotify: {sp_artist} 《{sp_title}》")
+                _log(f"    得分:    {pct}%（{reason_cn}）")
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
@@ -282,9 +282,8 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             song_type = best.get("type")
             song_id = best.get("id")
             if song_id is None or song_type is None:
-                _log(
-                    f"  [{idx}/{total}] ✗ 候选缺 id/type: {short}"
-                )
+                _log(f"[{idx}/{total}] ✗ 候选缺 id/type")
+                _log(f"    Spotify: {sp_artist} 《{sp_title}》")
                 unmatched_rows.append(
                     {
                         "spotify_track_id": sp_id,
@@ -300,15 +299,15 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             qq_artist = (best.get("artists") or [""])[0]
             dbm.cache_put(conn, _cache_row_for(track, best, score, method))
             matched.append((track, (int(song_id), int(song_type))))
-            _log(
-                f"  [{idx}/{total}] ✓ 匹配: {short}  →  "
-                f"{qq_title[:40]} — {qq_artist[:20]}  "
-                f"({pct}%, {reason_cn})"
-            )
+            _log(f"[{idx}/{total}] ✓ 匹配 ({pct}%)")
+            _log(f"    Spotify: {sp_artist} 《{sp_title}》")
+            _log(f"    QQ:      {qq_artist} 《{qq_title}》")
+            _log(f"    依据:    {reason_cn}")
             if idx % 25 == 0 or idx == total:
                 _log(
-                    f"        进度: 复用 {len(plan.reused_matched)} / 搜索 {searched} / "
-                    f"匹配 {len(matched) - len(plan.reused_matched)} / 未匹配 {len(unmatched_rows)}"
+                    f"—— 进度 {idx}/{total} —— 复用 {len(plan.reused_matched)} / "
+                    f"搜索 {searched} / 匹配 {len(matched) - len(plan.reused_matched)} / "
+                    f"未匹配 {len(unmatched_rows)}"
                 )
 
         _log(

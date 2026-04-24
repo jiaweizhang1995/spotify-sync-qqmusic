@@ -18,15 +18,14 @@ def _ensure_parent(path: str) -> None:
 
 
 def write_unmatched_txt(path: str, items: Iterable[dict[str, Any]]) -> int:
-    """Overwrite file with one `title | artist | reason` per line. Returns row count."""
+    """Overwrite file with one `artist 《title》` per line. Returns row count."""
     _ensure_parent(path)
     count = 0
     with open(path, "w", encoding="utf-8") as f:
         for item in items:
-            title = (item.get("title") or "").replace("|", "/").strip()
-            artist = (item.get("artist") or "").replace("|", "/").strip()
-            reason = (item.get("reason") or "").replace("|", "/").strip()
-            f.write(f"{title} | {artist} | {reason}\n")
+            title = (item.get("title") or "").strip()
+            artist = (item.get("artist") or "").strip()
+            f.write(f"{artist} 《{title}》\n")
             count += 1
     return count
 
