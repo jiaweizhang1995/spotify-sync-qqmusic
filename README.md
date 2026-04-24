@@ -1,440 +1,123 @@
-# Spotify -> QQ 音乐每日自动同步方案
+# Spotify → QQ 音乐 每日同步
 
-## 目标
+每天自动把一个 Spotify 歌单里的新歌同步到 QQ 音乐的同名歌单。单向、只追加、不删歌。
 
-实现一个**单向同步系统**：以 Spotify 歌单作为唯一真源，每天自动把新增或变更的歌曲同步到 QQ 音乐歌单中。
+## 它做什么
 
-推荐先做：
+- 每天定时跑一次（默认 UTC 19:00 / 北京 03:00）
+- 读 Spotify 源歌单
+- 在 QQ 音乐里搜同一首歌
+- 把新增的加到 QQ 音乐目标歌单
+- 匹配不上的写到 `data/unmatched.txt`，人工兜底
 
-- **单向同步**：`Spotify -> QQ音乐`
-- **每日一次定时任务**
-- **默认追加，不自动删除**
-- **匹配失败输出清单，人工兜底**
+## 需要准备
 
----
+- Python 3.12+
+- Spotify 开发者账号（拿 Client ID / Secret）
+- QQ 音乐账号（扫码登录）
 
-## 总结结论
+## 本地跑一次
 
-### Spotify
+```bash
+# 1. 装依赖
+make install
 
-Spotify 适合作为上游数据源：
+# 2. 复制配置
+cp .env.example .env
 
-- 有官方 Web API
-- 支持 OAuth 授权与 refresh token
-- 支持读取歌单、创建歌单、增删歌单曲目
+# 3. 拿 Spotify refresh token（一次性，会开浏览器）
+make bootstrap-spotify
+# 按提示把 SPOTIFY_CLIENT_ID / SECRET 填进 .env，跑完会打印 refresh token
 
-适合长期稳定跑自动任务。
+# 4. 扫码登录 QQ 音乐（一次性）
+make bootstrap-qq
+# 用手机 QQ 音乐扫终端里的二维码，跑完会打印 QQ_CREDENTIAL_JSON
 
-### QQ 音乐
+# 5. 设置要同步的歌单名（Spotify 和 QQ 两边都要有同名歌单，没有会自动建 QQ 那边）
+python -m src.main playlists
 
-QQ 音乐公开可用的官方写歌单接口不适合直接做这个项目；更现实的实现方式是使用社区维护的 API 库，通过登录态完成：
+# 6. 先预览，不写 QQ
+make dry-run
 
-- 登录
-- 获取用户歌单
-- 创建歌单
-- 添加歌曲
-- 删除歌曲
-
-因此最佳技术路线是：
-
-- **Spotify：官方 API**
-- **QQ音乐：社区维护 API / 登录态方案**
-
----
-
-## 推荐技术方案
-
-### 方案 A：后端定时同步服务（推荐）
-
-做一个小型同步服务，每天自动运行一次：
-
-1. 读取 Spotify 源歌单
-2. 标准化歌曲标题 / 歌手 / 时长
-3. 在 QQ 音乐搜索对应歌曲
-4. 计算差异
-5. 更新 QQ 音乐目标歌单
-6. 输出同步报告
-
-推荐部署位置：
-
-- VPS
-- NAS
-- Railway / Render / Fly.io
-- GitHub Actions（低成本，但登录态维护略麻烦）
-
-推荐语言：
-
-- **Python**
-
-原因：
-
-- Spotify SDK 和 HTTP 调用都成熟
-- QQ 音乐社区库在 Python 侧可用
-- 做 cron、SQLite、日志很方便
-
-### 方案 B：半自动同步（更稳）
-
-流程改为：
-
-1. 每天自动拉 Spotify 变化
-2. 先生成“待同步歌曲清单”
-3. 你点确认后，再写入 QQ 音乐
-
-适合下面场景：
-
-- 害怕误匹配
-- 害怕自动删歌
-- 害怕 QQ 音乐登录态/风控不稳定
-
-### 方案 C：UI 自动化（不推荐）
-
-用 Playwright 或 Appium 控制 QQ 音乐网页 / App 完成加歌。
-
-缺点：
-
-- 页面一改就坏
-- 维护成本高
-- 长期稳定性差
-
----
-
-## 推荐系统架构
-
-### 1. Source of Truth
-
-- Spotify 歌单为唯一真源
-
-### 2. Target
-
-- QQ 音乐中的一个目标歌单
-
-### 3. 存储
-
-用 SQLite 即可。
-
-建议数据表：
-
-#### `playlist_map`
-
-记录歌单映射：
-
-- `spotify_playlist_id`
-- `spotify_playlist_name`
-- `qq_playlist_id`
-- `qq_playlist_name`
-- `sync_mode`（append / mirror）
-
-#### `track_map_cache`
-
-记录跨平台歌曲映射：
-
-- `spotify_track_id`
-- `spotify_track_name`
-- `spotify_artist`
-- `spotify_isrc`
-- `qq_song_id`
-- `qq_song_mid`
-- `qq_song_name`
-- `qq_artist`
-- `match_score`
-- `match_method`（isrc / exact / fuzzy / manual）
-- `updated_at`
-
-#### `sync_runs`
-
-记录每次同步任务：
-
-- `run_id`
-- `playlist_id`
-- `started_at`
-- `finished_at`
-- `status`
-- `added_count`
-- `skipped_count`
-- `failed_count`
-- `notes`
-
-#### `unmatched_tracks`
-
-记录未匹配成功的歌曲，方便人工处理：
-
-- `spotify_track_id`
-- `title`
-- `artist`
-- `album`
-- `reason`
-- `created_at`
-
----
-
-## 每日同步流程
-
-### Step 1：拉取 Spotify 歌单
-
-从 Spotify API 读取指定歌单内容：
-
-- track id
-- title
-- artists
-- album
-- duration
-- ISRC（如果可拿到）
-
-### Step 2：歌曲标准化
-
-把歌曲名做清洗：
-
-- 去掉 `Remaster` / `Deluxe` / `Live` 等后缀噪音
-- 统一全半角 / 空格 / 大小写
-- 歌手名拆主歌手
-
-### Step 3：QQ 音乐搜索匹配
-
-优先级建议：
-
-1. **ISRC 精确匹配**
-2. `标题 + 主歌手` 精确匹配
-3. `标题 + 歌手 + 时长容差` 模糊匹配
-4. 失败则落入人工清单
-
-### Step 4：建立映射缓存
-
-找到一次后写入 `track_map_cache`，后续不必重复搜。
-
-### Step 5：计算 Diff
-
-同步模式建议支持两种：
-
-#### Append 模式（推荐先上）
-
-- 只把 Spotify 新增曲目加到 QQ 音乐
-- 不自动删除 QQ 已有歌
-
-优点：
-
-- 稳
-- 不容易误删
-- 适合 MVP
-
-#### Mirror 模式
-
-- QQ 音乐歌单始终与 Spotify 完全一致
-- 新增就加，删除就删
-
-优点：
-
-- 结果最一致
-
-缺点：
-
-- 误匹配/误删成本更高
-
-### Step 6：写入 QQ 音乐歌单
-
-- 创建歌单（如不存在）
-- 添加新增歌曲
-- 可选删除已下线歌曲
-
-### Step 7：生成同步报告
-
-同步结束后生成摘要：
-
-- 新增几首
-- 跳过几首
-- 哪些没匹配上
-- 哪些登录失败 / API 异常
-
-可发到：
-
-- 飞书机器人
-- 邮件
-- 本地日志
-
----
-
-## 核心难点
-
-### 1. 跨平台歌曲匹配
-
-这是整个系统最难的部分。
-
-原因：
-
-- 同一首歌在两边命名可能不同
-- 可能有多个版本：Live / Remaster / Deluxe / Radio Edit
-- 歌手名顺序不同
-- QQ 音乐与 Spotify 的 metadata 不完全一致
-
-建议匹配策略：
-
-```text
-优先 ISRC
-否则标题标准化 + 主歌手标准化
-再结合时长做二次筛选
-最后把失败项送人工确认
+# 7. 真跑
+make sync
 ```
 
-### 2. QQ 音乐登录态
+跑完看 `data/sync.log` 和 `data/unmatched.txt`。
 
-QQ 音乐侧最大风险不是功能本身，而是：
+## .env 字段
 
-- 登录态失效
-- 库接口变化
-- 风控
+| 字段 | 说明 |
+|---|---|
+| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | Spotify 开发者后台拿 |
+| `SPOTIFY_REFRESH_TOKEN` | `bootstrap-spotify` 生成 |
+| `SPOTIFY_PLAYLIST_NAME` | 源歌单名 |
+| `QQ_PLAYLIST_NAME` | 目标歌单名（不存在会新建） |
+| `QQ_CREDENTIAL_JSON` | `bootstrap-qq` 生成 |
+| `MIRROR_DELETE_THRESHOLD` | 镜像模式安全阀（默认 0.2，当前用不到） |
 
-建议：
+## 让它每天自己跑（GitHub Actions）
 
-- 不要高频运行
-- 每天最多 1~2 次
-- 做好失败重试
-- 保留二维码重新登录能力
+仓库里已经有 `.github/workflows/sync.yml`。只要把 `.env` 里的值作为 Repository Secrets 配到 GitHub：
 
-### 3. 风控与幂等
+- `SPOTIFY_CLIENT_ID`
+- `SPOTIFY_CLIENT_SECRET`
+- `SPOTIFY_REFRESH_TOKEN`
+- `SPOTIFY_PLAYLIST_NAME`
+- `QQ_PLAYLIST_NAME`
+- `QQ_CREDENTIAL_JSON`
+- `GH_PAT_SECRETS_WRITE`（fine-grained PAT，权限 `secrets:write`，用于 QQ musickey 过期时自动写回）
 
-必须保证：
+配好后每天 UTC 19:00 自动跑，也能在 Actions 页面手点 `Run workflow` 触发（勾选 `dry_run` 可预览）。
 
-- 同一首歌不会重复添加
-- 同一轮任务失败可安全重跑
+运行产物：
+- `data/` 分支：SQLite 库、日志、未匹配清单（自动 commit 回去）
+- Actions artifacts：`sync.log` + `unmatched.txt`（保留 30 天）
 
-所以同步逻辑要以“差异计算”为核心，而不是盲目重写整个歌单。
+## 常用命令
 
----
-
-## MVP 建议
-
-### 第 1 版只做这些
-
-- 1 个 Spotify 歌单
-- 1 个 QQ 音乐歌单
-- 每天同步 1 次
-- 只做追加新增
-- 不自动删除
-- 匹配失败写到 `unmatched_tracks`
-- 输出简单日志/日报
-
-### 第 2 版再做
-
-- 多歌单同步
-- 手工确认页面
-- Mirror 模式
-- 飞书通知
-- Web 管理后台
-
----
-
-## 推荐项目结构
-
-```text
-spotify-qqmusic-sync/
-  README.md
-  .env.example
-  requirements.txt
-  src/
-    main.py
-    config.py
-    db.py
-    models.py
-    scheduler.py
-    sync/
-      spotify_client.py
-      qqmusic_client.py
-      matcher.py
-      diff_engine.py
-      sync_service.py
-    reports/
-      notifier.py
-      report_builder.py
-  data/
-    sync.db
-  logs/
+```bash
+make install              # 装依赖
+make bootstrap-spotify    # Spotify 首次授权
+make bootstrap-qq         # QQ 音乐扫码登录
+make dry-run              # 预览不写
+make sync                 # 真同步
+make test                 # 跑测试
+python -m src.main playlists -s "源歌单" -q "目标歌单"   # 改歌单名
 ```
 
----
+## 常见问题
 
-## 推荐运行方式
+**QQ 登录态过期？**  
+重新跑 `make bootstrap-qq`，把新的 `QQ_CREDENTIAL_JSON` 更新到 `.env`（或 GitHub Secret）。GitHub Actions 里如果配了 `GH_PAT_SECRETS_WRITE`，musickey 刷新会自动写回 Secret。
 
-### 方式 1：本机 / NAS / VPS 上的 cron
+**有歌没同步过去？**  
+看 `data/unmatched.txt`。跨平台 metadata 对不上是常态，手动加即可。
 
-```cron
-0 3 * * * /usr/bin/python3 /path/to/src/main.py sync
+**不想删歌？**  
+默认就不删（append 模式）。Mirror 模式暂未启用。
+
+## 项目结构
+
+```
+src/
+  main.py            # CLI 入口
+  config.py          # 读 .env
+  spotify_client.py  # Spotify API
+  qqmusic_client.py  # QQ 音乐 API（社区库 qqmusic-api-python）
+  matcher.py         # 跨平台歌曲匹配
+  diff_engine.py     # 算差异
+  sync_service.py    # 主流程
+  db.py              # SQLite
+  report.py          # 同步报告
+scripts/
+  bootstrap_spotify.py
+  bootstrap_qq_login.py
+tests/
+data/                # 运行时产物（sync.db / sync.log / unmatched.txt）
 ```
 
-### 方式 2：GitHub Actions
+## 参考
 
-优点：
-
-- 省钱
-- 不需要常驻服务
-
-缺点：
-
-- QQ 音乐登录态管理更麻烦
-- 调试不如 VPS 方便
-
-### 方式 3：长期在线小服务
-
-适合你以后想扩成：
-
-- Web 面板
-- 多歌单
-- 手工审核
-- 飞书通知
-
----
-
-## 风险评估
-
-### 低风险部分
-
-- Spotify 读歌单
-- 定时任务
-- SQLite 存储
-- 差异计算
-
-### 中风险部分
-
-- QQ 音乐非官方接口波动
-- 登录态过期
-- 匹配精度
-
-### 高维护成本部分
-
-- 浏览器 UI 自动化
-- 做成完全零人工干预、强一致镜像同步
-
----
-
-## 我建议的最终路线
-
-直接做：
-
-1. **Python 后端定时同步服务**
-2. **Spotify 官方 API** 作为上游
-3. **QQ 音乐社区 API** 作为目标写入端
-4. **先做 Append 模式**
-5. **加映射缓存 + 未匹配清单**
-
-这是当前最容易落地、维护成本最低、长期可用性也最高的方案。
-
----
-
-## 参考资料
-
-### Spotify 官方
-
-- Authorization Code Flow: https://developer.spotify.com/documentation/web-api/tutorials/code-flow
-- Playlists 概念： https://developer.spotify.com/documentation/web-api/concepts/playlists
-- Create Playlist: https://developer.spotify.com/documentation/web-api/reference/create-playlist
-- Add Items to Playlist: https://developer.spotify.com/documentation/web-api/reference/add-items-to-playlist
-- Remove Playlist Items: https://developer.spotify.com/documentation/web-api/reference/remove-items-playlist
-
-### QQ 音乐社区库
-
-- PyPI: https://pypi.org/project/qqmusic-api-python/
-- 文档首页: https://l-1124.github.io/QQMusicApi/
-- 登录模块: https://l-1124.github.io/QQMusicApi/reference/modules/login/
-- 凭证说明: https://l-1124.github.io/QQMusicApi/tutorial/credential/
-- 搜索模块: https://l-1124.github.io/QQMusicApi/reference/modules/search/
-- 歌单模块: https://l-1124.github.io/QQMusicApi/reference/modules/songlist/
-- 用户模块: https://l-1124.github.io/QQMusicApi/reference/modules/user/
-
+- Spotify Web API: https://developer.spotify.com/documentation/web-api
+- qqmusic-api-python: https://pypi.org/project/qqmusic-api-python/
