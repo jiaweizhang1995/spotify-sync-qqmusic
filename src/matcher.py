@@ -45,6 +45,18 @@ _BARE_FEAT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Catch-all trailing bracket, regardless of contents:
+#   "以后 (After Us)"            → "以后"
+#   "变色龙（Chameleon）"        → "变色龙"
+#   "TRUST [Studio Take]"        → "TRUST"
+#   "Song (精选版)"              → "Song"
+# Keyword-based strip still runs first so "Song (Remaster 2019)" is handled
+# by _BRACKET_SUFFIX_RE with the token intact. This is the fallback for
+# translation / annotation parens the keyword regex misses.
+_TAIL_BRACKET_RE = re.compile(
+    r"\s*[\(\[（【][^()\[\]（）【】]*[\)\]）】]\s*$",
+)
+
 _WS_RE = re.compile(r"\s+")
 
 # Artist split delimiters per plan.
@@ -66,6 +78,11 @@ def normalize_title(s: str) -> str:
         s = _BRACKET_SUFFIX_RE.sub(" ", s)
     s = _DASH_SUFFIX_RE.sub("", s)
     s = _BARE_FEAT_RE.sub("", s)
+    # Final pass: strip ANY remaining trailing bracket (translations, annotations).
+    prev = None
+    while prev != s:
+        prev = s
+        s = _TAIL_BRACKET_RE.sub("", s)
     s = s.lower()
     s = _WS_RE.sub(" ", s).strip()
     return s
