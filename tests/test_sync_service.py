@@ -1,7 +1,8 @@
 """Integration tests for the sync orchestrator.
 
-Mocks both clients + credential loading + MusicBrainzClient at `src.sync_service`
-import sites so no network or subprocess activity occurs.
+Mocks both clients + credential loading at `src.sync_service` import sites
+so no network or subprocess activity occurs. Match rescue now uses a
+title-only fallback search (no external alias API).
 """
 
 from __future__ import annotations
@@ -90,18 +91,6 @@ def _make_qq_mock(
     return qq
 
 
-def _make_mb_mock(alias_map: dict[str, list[str]] | None = None) -> MagicMock:
-    """Return a MagicMock replacing the `MusicBrainzClient` class.
-
-    Calling it (constructing) yields an instance whose `get_aliases_batch`
-    returns the provided `alias_map`. Default = empty dict (no aliases).
-    """
-    instance = MagicMock()
-    instance.get_aliases_batch.return_value = alias_map or {}
-    cls = MagicMock(return_value=instance)
-    return cls, instance
-
-
 class TestRunSync(unittest.TestCase):
     def setUp(self) -> None:
         import tempfile
@@ -117,18 +106,15 @@ class TestRunSync(unittest.TestCase):
         sp_mock,
         qq_mock,
         rotated: bool = False,
-        mb_alias_map: dict[str, list[str]] | None = None,
     ):
         """Stack all the patches the orchestrator needs."""
         credential = MagicMock()
-        mb_cls, _mb_inst = _make_mb_mock(mb_alias_map)
         return [
             patch.object(svc, "SpotifyClient", return_value=sp_mock),
             patch.object(svc, "load_credential", return_value=credential),
             patch.object(svc, "ensure_fresh", return_value=(credential, rotated)),
             patch.object(svc, "dump_credential", return_value='{"new":"blob"}'),
             patch.object(svc, "QQClient", return_value=qq_mock),
-            patch.object(svc, "MusicBrainzClient", mb_cls),
         ]
 
     def test_mirror_adds_new_tracks(self):
@@ -339,29 +325,22 @@ class TestRunSync(unittest.TestCase):
         qq_second.search_song.assert_called_with("Song One Alice", num=10)
         self.assertEqual(qq_second.search_song.call_count, 1)
 
-    def test_alias_retry_rescues_weak_primary_search(self):
-        """When primary title+artist scores <0.8, alias-retry should salvage it."""
-        # Spotify: romanized name "Jay Chou"; QQ catalog only has Chinese name.
+    def test_title_only_retry_rescues_weak_primary(self):
+        """When title+artist scores <0.8, retry with title only should salvage."""
+        # Spotify: romanized name "Jay Chou"; QQ catalog indexes Chinese artist.
         sp_tracks = [_sp_track("sp1", "晴天", "Jay Chou", duration_ms=269000)]
-        # Primary search "晴天 Jay Chou" returns a candidate with wrong artist
-        # so title+artist match is weak (title=0.4, artist=0, duration=0.4=0.8
-        # if duration matches; fail below if it doesn't). Keep duration off to
-        # force an alias retry path.
-        primary_cand = _qq_cand(99, "晴天", "Unknown", duration_s=260, type_=0)
-        # Alias retry "晴天 周杰伦" returns the right candidate — full match.
-        alias_cand = _qq_cand(901, "晴天", "周杰伦", duration_s=269, type_=0)
+        # Primary `title+artist` search returns only a wrong-artist candidate.
+        primary_cand = _qq_cand(99, "晴天", "Unknown", duration_s=100, type_=0)
+        # Title-only search surfaces the canonical Chinese-artist version.
+        title_only_cand = _qq_cand(901, "晴天", "周杰伦", duration_s=269, type_=0)
         search_map = {
             "晴天 Jay Chou": [primary_cand],
-            "晴天 周杰伦": [alias_cand],
+            "晴天": [title_only_cand],
         }
         sp = _make_sp_mock(sp_tracks)
         qq = _make_qq_mock([], search_map)
 
-        patches = self._patches(
-            sp,
-            qq,
-            mb_alias_map={"Jay Chou": ["Jay Chou", "周杰伦"]},
-        )
+        patches = self._patches(sp, qq)
         for p in patches:
             p.start()
         try:
@@ -374,13 +353,12 @@ class TestRunSync(unittest.TestCase):
         qq.add_songs.assert_called_once()
         _, pairs_arg = qq.add_songs.call_args.args
         self.assertEqual(pairs_arg, [(901, 0)])
-        # Both primary and alias queries should have fired.
         called_queries = {c.args[0] for c in qq.search_song.call_args_list}
         self.assertIn("晴天 Jay Chou", called_queries)
-        self.assertIn("晴天 周杰伦", called_queries)
+        self.assertIn("晴天", called_queries)
 
-    def test_alias_retry_skipped_when_primary_already_strong(self):
-        """If primary search already scores ≥0.8, no alias retry fires."""
+    def test_title_only_retry_skipped_when_primary_already_strong(self):
+        """If primary search already scores ≥0.8, no title-only retry fires."""
         sp_tracks = [_sp_track("sp1", "Song One", "Alice")]
         search_map = {
             "Song One Alice": [_qq_cand(101, "Song One", "Alice", 200, 0)],
@@ -388,11 +366,7 @@ class TestRunSync(unittest.TestCase):
         sp = _make_sp_mock(sp_tracks)
         qq = _make_qq_mock([], search_map)
 
-        patches = self._patches(
-            sp,
-            qq,
-            mb_alias_map={"Alice": ["Alice", "Alice Smith"]},
-        )
+        patches = self._patches(sp, qq)
         for p in patches:
             p.start()
         try:
@@ -402,46 +376,7 @@ class TestRunSync(unittest.TestCase):
                 p.stop()
 
         self.assertEqual(rc, 0)
-        # Only one search call — the alias retry was skipped because the
-        # primary match already cleared threshold.
         self.assertEqual(qq.search_song.call_count, 1)
-
-    def test_mb_prefetch_called_with_to_search_artists(self):
-        """MB batch is invoked with the to_search artist list."""
-        sp_tracks = [
-            _sp_track("sp1", "Song One", "Alice"),
-            _sp_track("sp2", "Song Two", "Bob"),
-        ]
-        search_map = {
-            "Song One Alice": [_qq_cand(101, "Song One", "Alice", 200, 0)],
-            "Song Two Bob": [_qq_cand(102, "Song Two", "Bob", 200, 0)],
-        }
-        sp = _make_sp_mock(sp_tracks)
-        qq = _make_qq_mock([], search_map)
-
-        mb_cls, mb_inst = _make_mb_mock({})
-        credential = MagicMock()
-        patches = [
-            patch.object(svc, "SpotifyClient", return_value=sp),
-            patch.object(svc, "load_credential", return_value=credential),
-            patch.object(svc, "ensure_fresh", return_value=(credential, False)),
-            patch.object(svc, "dump_credential", return_value="{}"),
-            patch.object(svc, "QQClient", return_value=qq),
-            patch.object(svc, "MusicBrainzClient", mb_cls),
-        ]
-        for p in patches:
-            p.start()
-        try:
-            rc = svc.run_sync(_cfg(self.tmpdir), dry_run=False)
-        finally:
-            for p in patches:
-                p.stop()
-
-        self.assertEqual(rc, 0)
-        mb_inst.get_aliases_batch.assert_called_once()
-        batch_arg = mb_inst.get_aliases_batch.call_args.args[0]
-        artists = sorted(entry["artist"] for entry in batch_arg)
-        self.assertEqual(artists, ["Alice", "Bob"])
 
 
 if __name__ == "__main__":

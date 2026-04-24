@@ -26,7 +26,6 @@ from . import report
 from .config import Config
 from .diff_engine import compute_mirror_diff, safety_check
 from .matcher import normalize_artist, normalize_title, pick_best, score_candidate
-from .musicbrainz_client import MusicBrainzClient
 from .qqmusic_client import (
     QQClient,
     dump_credential,
@@ -104,53 +103,46 @@ def _qq_pair_from_cache(row: Any) -> tuple[int, int] | None:
     return (int(song_id), int(song_type))
 
 
-def _match_with_aliases(
+def _match_title_only_fallback(
     track: dict[str, Any],
     primary_candidates: list[dict[str, Any]],
-    aliases: list[str],
     qq: QQClient,
-    log_prefix: str,
 ) -> tuple[dict[str, Any] | None, float, str]:
-    """Try the primary search first; if < 0.8, retry with each alias.
+    """Try `title+artist` first; if < 0.8, retry with `title` alone.
 
-    Picks the single best candidate across all search variants. Logs alias
-    retries for later forensics. Alias set always starts with the primary
-    artist so we don't double-search.
+    QQ's own index already contains Chinese-artist versions for most English
+    Spotify artists. Re-searching with just the title surfaces those without
+    needing any external alias database. ISRC + duration carry the match once
+    the candidate set is broader.
     """
     best, best_score, best_method = pick_best(track, primary_candidates, threshold=0.8)
     if best is not None and best_score >= 0.8:
         return best, best_score, best_method
 
-    title = track.get("title") or track.get("name") or ""
-    primary_artist = _primary_artist(track)
-
-    # Track the best overall hit across primary + alias queries.
     overall_cand = best
     overall_score = best_score
     overall_method = best_method
 
-    for alias in aliases or []:
-        alias = (alias or "").strip()
-        if not alias or alias == primary_artist:
-            continue
-        query = f"{title} {alias}".strip()
-        _log(f"    [alias retry] {query!r}")
-        try:
-            alt_cands = qq.search_song(query, num=10)
-        except Exception as exc:  # pragma: no cover — defensive
-            _log(f"    [alias retry] search failed for {alias!r}: {exc}")
-            continue
+    title = (track.get("title") or track.get("name") or "").strip()
+    if not title:
+        return None, overall_score, overall_method
 
-        # Score each alt candidate against the ORIGINAL spotify track (so the
-        # primary-artist set is still what grounds scoring).
-        for cand in alt_cands:
-            score, method = score_candidate(track, cand)
-            if score > overall_score:
-                overall_score = score
-                overall_method = f"alias:{alias}|{method}"
-                overall_cand = cand
-                if score >= 1.0:
-                    return overall_cand, overall_score, overall_method
+    query = title
+    _log(f"    [title-only] {query!r}")
+    try:
+        alt_cands = qq.search_song(query, num=10)
+    except Exception as exc:  # pragma: no cover — defensive
+        _log(f"    [title-only] search failed: {exc}")
+        return (None if overall_score < 0.8 else overall_cand), overall_score, overall_method
+
+    for cand in alt_cands:
+        score, method = score_candidate(track, cand)
+        if score > overall_score:
+            overall_score = score
+            overall_method = f"title-only|{method}"
+            overall_cand = cand
+            if score >= 1.0:
+                return overall_cand, overall_score, overall_method
 
     if overall_cand is None or overall_score < 0.8:
         return None, overall_score, overall_method
@@ -230,32 +222,6 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             f"snap_del={len(plan.to_remove_from_qq)}"
         )
 
-        # Pre-warm MB alias cache for artists we are about to search. Batch
-        # resolves names in parallel behind a global 1 req/s wire limiter.
-        alias_map: dict[str, list[str]] = {}
-        if plan.to_search:
-            alias_inputs = [
-                {
-                    "artist": _primary_artist(t),
-                    "isrc": t.get("isrc"),
-                }
-                for t in plan.to_search
-                if _primary_artist(t)
-            ]
-            unique_artists = len({a["artist"] for a in alias_inputs})
-            _log(
-                f"[MB] pre-fetching aliases for {unique_artists} artists "
-                f"(UA={cfg.musicbrainz_user_agent!r})"
-            )
-            try:
-                mb_client = MusicBrainzClient(
-                    cfg.musicbrainz_user_agent, conn
-                )
-                alias_map = mb_client.get_aliases_batch(alias_inputs)
-            except Exception as exc:  # pragma: no cover — MB should degrade gracefully
-                _log(f"[MB] pre-fetch failed ({exc}); continuing without aliases")
-                alias_map = {}
-
         _log(f"[5/9] matching {len(plan.to_search)} track(s) against QQ...")
         matched: list[tuple[dict[str, Any], tuple[int, int]]] = list(plan.reused_matched)
         unmatched_rows: list[dict[str, Any]] = []
@@ -288,10 +254,7 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 )
                 continue
 
-            aliases = alias_map.get(_primary_artist(track), [])
-            best, score, method = _match_with_aliases(
-                track, candidates, aliases, qq, log_prefix=f"[{idx}/{total}]"
-            )
+            best, score, method = _match_title_only_fallback(track, candidates, qq)
 
             if best is None:
                 _log(
