@@ -12,7 +12,7 @@ from .text_util import to_simplified
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 API_BASE = "https://api.spotify.com/v1"
 PLAYLIST_ITEM_FIELDS = (
-    "items(item(id,name,duration_ms,artists(name),"
+    "items(added_at,item(id,name,duration_ms,artists(name),"
     "album(name),external_ids(isrc))),next"
 )
 MAX_RETRIES = 3
@@ -97,13 +97,15 @@ class SpotifyClient:
                 track = item.get("item") or item.get("track")
                 if track is None:
                     continue
-                out.append(_normalize_track(track))
+                out.append(_normalize_track(track, added_at=item.get("added_at")))
             url = body.get("next")
             params = None
         return out
 
 
-def _normalize_track(track: dict[str, Any]) -> dict[str, Any]:
+def _normalize_track(
+    track: dict[str, Any], *, added_at: str | None = None
+) -> dict[str, Any]:
     # Traditional → Simplified so search queries match QQ's mainland catalog.
     artists = [
         to_simplified(a.get("name", "")) for a in track.get("artists", []) if a
@@ -118,4 +120,5 @@ def _normalize_track(track: dict[str, Any]) -> dict[str, Any]:
         "album": album,
         "duration_ms": track.get("duration_ms", 0),
         "isrc": isrc,
+        "added_at": added_at,
     }

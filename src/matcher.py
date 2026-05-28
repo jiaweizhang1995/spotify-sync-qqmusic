@@ -149,6 +149,21 @@ def _get_duration_ms(track: Any) -> int | None:
     return None
 
 
+def artist_names(entry: Any) -> list[str]:
+    """Return normalized artist keys from raw Spotify/QQ artist data."""
+    names = {normalize_artist(a) for a in _artist_names(entry) if a}
+    names.discard("")
+    return sorted(names)
+
+
+def has_artist_overlap(sp_track: dict, qq_cand: dict) -> bool:
+    sp_artists = set(artist_names(sp_track.get("artists") or sp_track.get("artist")))
+    qq_artists = set(
+        artist_names(qq_cand.get("artists") or qq_cand.get("singer") or qq_cand.get("artist"))
+    )
+    return bool(sp_artists and qq_artists and (sp_artists & qq_artists))
+
+
 def score_candidate(sp_track: dict, qq_cand: dict) -> tuple[float, str]:
     """Return (score, method) in [0.0, 1.0]. ISRC equality forces 1.0/'isrc'."""
     sp_isrc = _get_isrc(sp_track)
@@ -165,19 +180,7 @@ def score_candidate(sp_track: dict, qq_cand: dict) -> tuple[float, str]:
         score += 0.4
         reasons.append("title")
 
-    sp_artists = {
-        normalize_artist(a)
-        for a in _artist_names(sp_track.get("artists") or sp_track.get("artist"))
-        if a
-    }
-    qq_artists = {
-        normalize_artist(a)
-        for a in _artist_names(qq_cand.get("artists") or qq_cand.get("singer") or qq_cand.get("artist"))
-        if a
-    }
-    sp_artists.discard("")
-    qq_artists.discard("")
-    if sp_artists and qq_artists and (sp_artists & qq_artists):
+    if has_artist_overlap(sp_track, qq_cand):
         score += 0.2
         reasons.append("artist")
 
@@ -189,6 +192,17 @@ def score_candidate(sp_track: dict, qq_cand: dict) -> tuple[float, str]:
 
     method = "+".join(reasons) if reasons else "none"
     return score, method
+
+
+def is_confident_match(sp_track: dict, qq_cand: dict, score: float) -> bool:
+    """Guard against same-title/same-duration covers by requiring artist evidence."""
+    if score < 0.8:
+        return False
+    sp_isrc = _get_isrc(sp_track)
+    qq_isrc = _get_isrc(qq_cand)
+    if sp_isrc and qq_isrc and sp_isrc == qq_isrc:
+        return True
+    return has_artist_overlap(sp_track, qq_cand)
 
 
 def pick_best(
@@ -206,6 +220,6 @@ def pick_best(
             best_cand = cand
             if score >= 1.0:
                 break
-    if best_cand is None or best_score < threshold:
+    if best_cand is None or not is_confident_match(sp_track, best_cand, best_score):
         return None, best_score, best_method
     return best_cand, best_score, best_method

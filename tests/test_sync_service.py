@@ -17,6 +17,7 @@ ROOT = os.path.dirname(HERE)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+from src import db
 from src import sync_service as svc
 from src.config import Config
 
@@ -39,7 +40,12 @@ def _cfg(tmpdir: str, threshold: float = 0.2) -> Config:
 
 
 def _sp_track(
-    tid: str, title: str, artist: str, duration_ms: int = 200000, isrc: str | None = None
+    tid: str,
+    title: str,
+    artist: str,
+    duration_ms: int = 200000,
+    isrc: str | None = None,
+    added_at: str | None = None,
 ) -> dict:
     return {
         "id": tid,
@@ -48,6 +54,7 @@ def _sp_track(
         "album": "Album",
         "duration_ms": duration_ms,
         "isrc": isrc,
+        "added_at": added_at,
     }
 
 
@@ -106,16 +113,153 @@ class TestRunSync(unittest.TestCase):
         sp_mock,
         qq_mock,
         rotated: bool = False,
+        aliases: dict[str, list[str]] | None = None,
     ):
         """Stack all the patches the orchestrator needs."""
         credential = MagicMock()
+        alias_client = MagicMock()
+        alias_map = aliases or {}
+        alias_client.get_aliases_for_isrc.side_effect = (
+            lambda isrc, artist: alias_map.get(artist, [artist])
+        )
         return [
             patch.object(svc, "SpotifyClient", return_value=sp_mock),
             patch.object(svc, "load_credential", return_value=credential),
             patch.object(svc, "ensure_fresh", return_value=(credential, rotated)),
             patch.object(svc, "dump_credential", return_value='{"new":"blob"}'),
             patch.object(svc, "QQClient", return_value=qq_mock),
+            patch.object(svc, "MusicBrainzClient", return_value=alias_client),
         ]
+
+    def test_split_artist_aliases_from_qq_singer_name(self):
+        self.assertEqual(
+            svc._split_artist_aliases("方大同 (Khalil Fong)"),
+            ["方大同 (Khalil Fong)", "Khalil Fong", "方大同"],
+        )
+
+    def test_adds_in_added_at_ascending_order(self):
+        """Spotify returns out-of-order; sync must add to QQ in asc order
+        so QQ's added-time-desc view matches Spotify's."""
+        sp_tracks = [
+            _sp_track("sp_c", "C", "X", added_at="2024-03-01T00:00:00Z"),
+            _sp_track("sp_a", "A", "X", added_at="2024-01-01T00:00:00Z"),
+            _sp_track("sp_b", "B", "X", added_at="2024-02-01T00:00:00Z"),
+        ]
+        search_map = {
+            "C X": [_qq_cand(303, "C", "X", 200, 0)],
+            "A X": [_qq_cand(101, "A", "X", 200, 0)],
+            "B X": [_qq_cand(202, "B", "X", 200, 0)],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq = _make_qq_mock([], search_map)
+
+        patches = self._patches(sp, qq)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(_cfg(self.tmpdir), dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq.add_songs.assert_called_once()
+        _, pairs = qq.add_songs.call_args.args
+        self.assertEqual(pairs, [(101, 0), (202, 0), (303, 0)])
+
+    def test_incremental_adds_new_song_after_existing_without_rebuild(self):
+        sp_tracks = [
+            _sp_track("old", "Old", "X", added_at="2024-01-01T00:00:00Z"),
+            _sp_track("new", "New", "X", added_at="2024-02-01T00:00:00Z"),
+        ]
+        search_map = {
+            "Old X": [_qq_cand(101, "Old", "X", 200, 0)],
+            "New X": [_qq_cand(202, "New", "X", 200, 0)],
+        }
+        sp = _make_sp_mock([sp_tracks[0]])
+        qq_first = _make_qq_mock([], search_map)
+
+        cfg = _cfg(self.tmpdir)
+        patches = self._patches(sp, qq_first)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+
+        sp.get_playlist_tracks.return_value = sp_tracks
+        qq_second = _make_qq_mock([_qq_cand(101, "Old", "X", 200, 0)], search_map)
+        patches = self._patches(sp, qq_second)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq_second.del_songs.assert_not_called()
+        qq_second.add_songs.assert_called_once()
+        _, add_pairs = qq_second.add_songs.call_args.args
+        self.assertEqual(add_pairs, [(202, 0)])
+
+    def test_order_drift_rebuilds_playlist(self):
+        sp_tracks = [
+            _sp_track("sp_a", "A", "X", added_at="2024-01-01T00:00:00Z"),
+            _sp_track("sp_b", "B", "X", added_at="2024-02-01T00:00:00Z"),
+            _sp_track("sp_c", "C", "X", added_at="2024-03-01T00:00:00Z"),
+        ]
+        search_map = {
+            "A X": [_qq_cand(101, "A", "X", 200, 0)],
+            "B X": [_qq_cand(202, "B", "X", 200, 0)],
+            "C X": [_qq_cand(303, "C", "X", 200, 0)],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq_first = _make_qq_mock([], search_map)
+
+        cfg = _cfg(self.tmpdir, threshold=0.5)
+        patches = self._patches(sp, qq_first)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+
+        # Current QQ order is neither insertion-asc [101, 202, 303] nor
+        # display-desc [303, 202, 101], so sync must rebuild.
+        qq_second = _make_qq_mock(
+            [
+                _qq_cand(202, "B", "X", 200, 0),
+                _qq_cand(101, "A", "X", 200, 0),
+                _qq_cand(303, "C", "X", 200, 0),
+            ],
+            search_map,
+        )
+        patches = self._patches(sp, qq_second)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq_second.del_songs.assert_called_once()
+        _, del_pairs = qq_second.del_songs.call_args.args
+        self.assertEqual(del_pairs, [(202, 0), (101, 0), (303, 0)])
+        qq_second.add_songs.assert_called_once()
+        _, add_pairs = qq_second.add_songs.call_args.args
+        self.assertEqual(add_pairs, [(101, 0), (202, 0), (303, 0)])
 
     def test_mirror_adds_new_tracks(self):
         sp_tracks = [
@@ -289,6 +433,56 @@ class TestRunSync(unittest.TestCase):
         qq_second.add_songs.assert_not_called()
         qq_second.del_songs.assert_not_called()
 
+    def test_incremental_without_snapshot_uses_cached_and_unmatched_progress(self):
+        sp_tracks = [
+            _sp_track("sp1", "Song One", "Alice"),
+            _sp_track("sp2", "Unfindable Track", "Nobody"),
+        ]
+        search_map = {
+            "Song One Alice": [_qq_cand(101, "Song One", "Alice", 200, 0)],
+            "Unfindable Track Nobody": [],
+            "Unfindable Track": [],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq_first = _make_qq_mock([], search_map)
+
+        cfg = _cfg(self.tmpdir)
+        patches = self._patches(sp, qq_first)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        self.assertGreaterEqual(qq_first.search_song.call_count, 2)
+
+        conn = db.connect(cfg.db_path)
+        try:
+            db.snapshot_clear(conn, "pl1")
+        finally:
+            conn.close()
+
+        qq_second = _make_qq_mock(
+            [_qq_cand(101, "Song One", "Alice", 200, 0)],
+            search_map,
+        )
+        patches = self._patches(sp, qq_second)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq_second.search_song.assert_not_called()
+        qq_second.add_songs.assert_not_called()
+        qq_second.del_songs.assert_not_called()
+
     def test_full_flag_bypasses_snapshot(self):
         """--full forces a re-search even when snapshot matches."""
         sp_tracks = [_sp_track("sp1", "Song One", "Alice")]
@@ -340,7 +534,7 @@ class TestRunSync(unittest.TestCase):
         sp = _make_sp_mock(sp_tracks)
         qq = _make_qq_mock([], search_map)
 
-        patches = self._patches(sp, qq)
+        patches = self._patches(sp, qq, aliases={"Jay Chou": ["Jay Chou", "周杰伦"]})
         for p in patches:
             p.start()
         try:
@@ -356,6 +550,103 @@ class TestRunSync(unittest.TestCase):
         called_queries = {c.args[0] for c in qq.search_song.call_args_list}
         self.assertIn("晴天 Jay Chou", called_queries)
         self.assertIn("晴天", called_queries)
+
+    def test_qq_singer_alias_rescues_romanized_artist(self):
+        sp_tracks = [_sp_track("sp1", "暖", "Khalil Fong", duration_ms=200000)]
+        cand = _qq_cand(301, "暖", "方大同", duration_s=200, type_=0)
+        search_map = {
+            "暖 Khalil Fong": [cand],
+            "暖": [cand],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq = _make_qq_mock([], search_map)
+        qq.search_singers.return_value = [
+            {
+                "id": 1,
+                "mid": "s1",
+                "name": "方大同 (Khalil Fong)",
+                "title": "方大同 (Khalil Fong)",
+            }
+        ]
+
+        patches = self._patches(sp, qq)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(_cfg(self.tmpdir), dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq.add_songs.assert_called_once()
+        _, pairs_arg = qq.add_songs.call_args.args
+        self.assertEqual(pairs_arg, [(301, 0)])
+        qq.search_singers.assert_called_with("Khalil Fong", num=5)
+
+    def test_title_fallback_tries_base_title_before_dash(self):
+        sp_tracks = [
+            _sp_track(
+                "sp1",
+                "Morning Selection - Instrumental; 2019 Remaster",
+                "HONEY&B-BOYS",
+                duration_ms=200000,
+            )
+        ]
+        cand = _qq_cand(401, "Morning Selection", "HONEY&B-BOYS", duration_s=200)
+        search_map = {
+            "Morning Selection - Instrumental; 2019 Remaster HONEY&B-BOYS": [],
+            "Morning Selection - Instrumental; 2019 Remaster": [],
+            "morning selection - instrumental; 2019 remaster": [],
+            "Morning Selection": [cand],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq = _make_qq_mock([], search_map)
+
+        patches = self._patches(sp, qq)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(_cfg(self.tmpdir), dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq.add_songs.assert_called_once()
+        _, pairs_arg = qq.add_songs.call_args.args
+        self.assertEqual(pairs_arg, [(401, 0)])
+        self.assertIn(
+            "Morning Selection",
+            [c.args[0] for c in qq.search_song.call_args_list],
+        )
+
+    def test_title_duration_wrong_artist_is_rejected(self):
+        """Same title + same duration is not enough when artist differs."""
+        sp_tracks = [_sp_track("sp1", "Song One", "Alice")]
+        search_map = {
+            "Song One Alice": [_qq_cand(909, "Song One", "Mallory", 200, 0)],
+            "Song One": [_qq_cand(909, "Song One", "Mallory", 200, 0)],
+        }
+        sp = _make_sp_mock(sp_tracks)
+        qq = _make_qq_mock([], search_map)
+
+        cfg = _cfg(self.tmpdir)
+        patches = self._patches(sp, qq)
+        for p in patches:
+            p.start()
+        try:
+            rc = svc.run_sync(cfg, dry_run=False)
+        finally:
+            for p in patches:
+                p.stop()
+
+        self.assertEqual(rc, 0)
+        qq.add_songs.assert_not_called()
+        with open(cfg.unmatched_path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Song One", content)
+        self.assertIn("Alice", content)
 
     def test_title_only_retry_skipped_when_primary_already_strong(self):
         """If primary search already scores ≥0.8, no title-only retry fires."""

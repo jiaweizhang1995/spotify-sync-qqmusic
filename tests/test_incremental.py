@@ -23,7 +23,12 @@ def _track(tid: str, title: str = "t", artist: str = "a") -> dict:
     }
 
 
-def _cache_row(sp_id: str, qq_id: int, qq_type: int = 0) -> dict:
+def _cache_row(
+    sp_id: str,
+    qq_id: int,
+    qq_type: int = 0,
+    match_method: str = "title+artist",
+) -> dict:
     return {
         "spotify_track_id": sp_id,
         "spotify_title": "t",
@@ -35,7 +40,7 @@ def _cache_row(sp_id: str, qq_id: int, qq_type: int = 0) -> dict:
         "qq_title": "歌",
         "qq_artist": "手",
         "match_score": 0.9,
-        "match_method": "title+artist",
+        "match_method": match_method,
     }
 
 
@@ -56,6 +61,33 @@ class TestBuildPlan(unittest.TestCase):
         self.assertEqual(len(plan.to_search), 3)
         self.assertEqual(plan.to_remove_from_qq, [])
         self.assertEqual(plan.reused_matched, [])
+
+    def test_no_snapshot_reuses_cache_and_skips_prior_unmatched(self):
+        conn = self._conn()
+        db.cache_put(conn, _cache_row("s1", 11, 0))
+        db.insert_unmatched(
+            conn,
+            [
+                {
+                    "spotify_track_id": "s2",
+                    "title": "missing",
+                    "artist": "nobody",
+                    "album": "",
+                    "reason": "最佳候选 40%",
+                }
+            ],
+        )
+
+        current = [_track("s1"), _track("s2"), _track("s3"), _track("s4")]
+        plan = incremental.build_plan(conn, "pl1", current, 100, full=False)
+
+        self.assertEqual(sorted(t["id"] for t in plan.to_search), ["s3", "s4"])
+        self.assertEqual(
+            [(t["id"], pair) for t, pair in plan.reused_matched],
+            [("s1", (11, 0))],
+        )
+        self.assertEqual([t["id"] for t in plan.skipped_unmatched], ["s2"])
+        self.assertEqual(plan.to_remove_from_qq, [])
 
     def test_incremental_add_only_searches_new(self):
         conn = self._conn()
@@ -122,6 +154,28 @@ class TestBuildPlan(unittest.TestCase):
         self.assertEqual(plan.to_remove_from_qq, [])
         self.assertEqual(plan.reused_matched, [])
 
+    def test_full_flag_bypasses_prior_unmatched(self):
+        conn = self._conn()
+        db.insert_unmatched(
+            conn,
+            [
+                {
+                    "spotify_track_id": "s1",
+                    "title": "missing",
+                    "artist": "nobody",
+                    "album": "",
+                    "reason": "最佳候选 40%",
+                }
+            ],
+        )
+
+        current = [_track("s1")]
+        plan = incremental.build_plan(conn, "pl1", current, 100, full=True)
+
+        self.assertEqual([t["id"] for t in plan.to_search], ["s1"])
+        self.assertEqual(plan.reused_matched, [])
+        self.assertEqual(plan.skipped_unmatched, [])
+
     def test_kept_track_missing_from_cache_falls_back_to_search(self):
         conn = self._conn()
         # Only s1 has a cached match; s2 is in snapshot but NOT in track_map_cache.
@@ -136,6 +190,78 @@ class TestBuildPlan(unittest.TestCase):
         self.assertEqual(search_ids, ["s2"])
         reused_ids = [t["id"] for t, _ in plan.reused_matched]
         self.assertEqual(reused_ids, ["s1"])
+        self.assertEqual(plan.to_remove_from_qq, [])
+
+    def test_kept_weak_cache_without_artist_is_researched(self):
+        conn = self._conn()
+        db.cache_put(conn, _cache_row("s1", 11, 0, match_method="title+duration"))
+        db.cache_put(conn, _cache_row("s2", 22, 0, match_method="isrc"))
+        db.snapshot_put(conn, "pl1", ["s1", "s2"], qq_dirid=100)
+
+        current = [_track("s1"), _track("s2")]
+        plan = incremental.build_plan(conn, "pl1", current, 100, full=False)
+
+        self.assertEqual([t["id"] for t in plan.to_search], ["s1"])
+        self.assertEqual(
+            [(t["id"], pair) for t, pair in plan.reused_matched],
+            [("s2", (22, 0))],
+        )
+        self.assertEqual(plan.to_remove_from_qq, [])
+
+    def test_kept_prior_unmatched_is_skipped_not_researched(self):
+        conn = self._conn()
+        db.cache_put(conn, _cache_row("s1", 11, 0))
+        db.insert_unmatched(
+            conn,
+            [
+                {
+                    "spotify_track_id": "s2",
+                    "title": "missing",
+                    "artist": "nobody",
+                    "album": "",
+                    "reason": "最佳候选 40%",
+                }
+            ],
+        )
+        db.snapshot_put(conn, "pl1", ["s1", "s2"], qq_dirid=100)
+
+        current = [_track("s1"), _track("s2")]
+        plan = incremental.build_plan(conn, "pl1", current, 100, full=False)
+
+        self.assertEqual(plan.to_search, [])
+        self.assertEqual(
+            [(t["id"], pair) for t, pair in plan.reused_matched],
+            [("s1", (11, 0))],
+        )
+        self.assertEqual([t["id"] for t in plan.skipped_unmatched], ["s2"])
+        self.assertEqual(plan.to_remove_from_qq, [])
+
+    def test_added_prior_unmatched_is_skipped_not_researched(self):
+        conn = self._conn()
+        db.cache_put(conn, _cache_row("s1", 11, 0))
+        db.insert_unmatched(
+            conn,
+            [
+                {
+                    "spotify_track_id": "s2",
+                    "title": "missing",
+                    "artist": "nobody",
+                    "album": "",
+                    "reason": "最佳候选 40%",
+                }
+            ],
+        )
+        db.snapshot_put(conn, "pl1", ["s1"], qq_dirid=100)
+
+        current = [_track("s1"), _track("s2"), _track("s3")]
+        plan = incremental.build_plan(conn, "pl1", current, 100, full=False)
+
+        self.assertEqual([t["id"] for t in plan.to_search], ["s3"])
+        self.assertEqual(
+            [(t["id"], pair) for t, pair in plan.reused_matched],
+            [("s1", (11, 0))],
+        )
+        self.assertEqual([t["id"] for t in plan.skipped_unmatched], ["s2"])
         self.assertEqual(plan.to_remove_from_qq, [])
 
     def test_removed_track_without_cache_is_skipped(self):

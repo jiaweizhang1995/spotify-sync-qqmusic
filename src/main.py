@@ -25,6 +25,14 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return run_sync(cfg, dry_run=bool(args.dry_run), full=bool(args.full))
 
 
+def _cmd_reorder(args: argparse.Namespace) -> int:
+    from .config import load_config
+    from .reorder_service import run_reorder
+
+    cfg = load_config()
+    return run_reorder(cfg, dry_run=bool(args.dry_run))
+
+
 def _run_script(rel_path: str) -> int:
     script = os.path.join(_repo_root(), rel_path)
     if not os.path.exists(script):
@@ -146,9 +154,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument(
         "--full",
         action="store_true",
-        help="Full re-sync: ignore incremental snapshot and search every track.",
+        help="Full re-sync: ignore incremental progress and search every track.",
     )
     p_sync.set_defaults(func=_cmd_sync)
+
+    p_reorder = sub.add_parser(
+        "reorder",
+        help=(
+            "重排 QQ 歌单：按 Spotify added_at 升序清空+重加，"
+            "让 QQ 添加时间倒序视图与 Spotify 添加时间倒序一致。"
+        ),
+    )
+    p_reorder.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="预览删除/重加数量与前几首顺序，不写 QQ。",
+    )
+    p_reorder.set_defaults(func=_cmd_reorder)
 
     p_setup = sub.add_parser(
         "setup",

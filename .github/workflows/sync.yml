@@ -2,8 +2,8 @@ name: Daily sync
 
 on:
   schedule:
-    # 19:00 UTC = 03:00 Asia/Shanghai
-    - cron: "0 19 * * *"
+    # 11:00 UTC = 19:00 Asia/Shanghai
+    - cron: "0 11 * * *"
   workflow_dispatch:
     inputs:
       dry_run:

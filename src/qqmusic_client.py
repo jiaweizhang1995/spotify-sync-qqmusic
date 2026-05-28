@@ -170,13 +170,40 @@ class QQClient:
 
         return _run(_do())
 
+    def search_singers(self, keyword: str, num: int = 5) -> list[dict[str, Any]]:
+        """Search singers by keyword. Returns normalized alias candidates."""
+
+        async def _do() -> list[dict[str, Any]]:
+            client = self._client()
+            try:
+                resp = await client.search.search_by_type(
+                    keyword=keyword, search_type=SearchType.SINGER, num=num
+                )
+                return [
+                    {
+                        "id": singer.id,
+                        "mid": singer.mid,
+                        "name": to_simplified(singer.name),
+                        "title": to_simplified(singer.title),
+                    }
+                    for singer in resp.singer
+                ]
+            finally:
+                await client.close()
+
+        return _run(_do())
+
     def add_songs(self, dirid: int, items: list[tuple[int, int]]) -> bool:
         """Add songs to a playlist in batches of 30, one retry per batch."""
         return _run(self._batch_op(dirid, items, op="add"))
 
     def del_songs(self, dirid: int, items: list[tuple[int, int]]) -> bool:
         """Remove songs from a playlist in batches of 30, one retry per batch."""
-        return _run(self._batch_op(dirid, items, op="del"))
+        # QQ's songlist delete endpoint expects songType=0 even when playlist
+        # detail/search models expose normal songs as type=1. Passing through
+        # the exposed type can return success without removing the row.
+        delete_items = [(song_id, 0) for song_id, _song_type in items]
+        return _run(self._batch_op(dirid, delete_items, op="del"))
 
     async def _batch_op(
         self, dirid: int, items: list[tuple[int, int]], *, op: str

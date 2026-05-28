@@ -8,6 +8,7 @@ for `sys.exit`.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,7 +26,14 @@ from . import incremental
 from . import report
 from .config import Config
 from .diff_engine import compute_mirror_diff, safety_check
-from .matcher import normalize_artist, normalize_title, pick_best, score_candidate
+from .matcher import (
+    is_confident_match,
+    normalize_artist,
+    normalize_title,
+    pick_best,
+    score_candidate,
+)
+from .musicbrainz_client import MusicBrainzClient
 from .text_util import explain_method
 from .qqmusic_client import (
     QQClient,
@@ -36,6 +44,19 @@ from .qqmusic_client import (
 from .spotify_client import SpotifyClient
 
 
+def _added_at_sort_key(track: dict[str, Any]) -> tuple[int, str, str]:
+    """Sort tracks by Spotify `added_at` ascending; missing values go first.
+
+    Stable on Spotify track id so consecutive runs see identical order. When
+    `add_songs` runs in this order, the most-recently-added Spotify track is
+    the freshest QQ entry — putting it at the top of QQ's "added time desc"
+    view, matching the user's Spotify view.
+    """
+    added_at = track.get("added_at") or ""
+    has_added = 1 if added_at else 0
+    return (has_added, added_at, str(track.get("id") or ""))
+
+
 def _primary_artist(track: dict[str, Any]) -> str:
     artists = track.get("artists") or []
     if not artists:
@@ -44,6 +65,19 @@ def _primary_artist(track: dict[str, Any]) -> str:
     if isinstance(first, dict):
         return first.get("name", "") or ""
     return str(first)
+
+
+def _artist_strings(track: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for artist in track.get("artists") or []:
+        if isinstance(artist, dict):
+            name = artist.get("name", "")
+        else:
+            name = str(artist)
+        name = name.strip()
+        if name:
+            out.append(name)
+    return out
 
 
 def _search_query(track: dict[str, Any]) -> str:
@@ -104,51 +138,259 @@ def _qq_pair_from_cache(row: Any) -> tuple[int, int] | None:
     return (int(song_id), int(song_type))
 
 
+def _qq_pair_from_song(song: dict[str, Any]) -> tuple[int, int] | None:
+    song_id = song.get("id")
+    song_type = song.get("type")
+    if song_id is None or song_type is None:
+        return None
+    return (int(song_id), int(song_type))
+
+
+def _ordered_unique_pairs(
+    sp_tracks: list[dict[str, Any]],
+    matched: list[tuple[dict[str, Any], tuple[int, int]]],
+) -> list[tuple[int, int]]:
+    by_sp_id: dict[str, tuple[int, int]] = {}
+    for track, pair in matched:
+        sp_id = track.get("id")
+        if sp_id is None:
+            continue
+        by_sp_id[str(sp_id)] = pair
+
+    ordered: list[tuple[int, int]] = []
+    seen_qq_ids: set[int] = set()
+    for track in sp_tracks:
+        sp_id = track.get("id")
+        if sp_id is None:
+            continue
+        pair = by_sp_id.get(str(sp_id))
+        if pair is None or pair[0] in seen_qq_ids:
+            continue
+        ordered.append(pair)
+        seen_qq_ids.add(pair[0])
+    return ordered
+
+
+def _qq_current_ids(qq_current: list[dict[str, Any]]) -> list[int]:
+    return [int(s["id"]) for s in qq_current if s.get("id") is not None]
+
+
+def _incremental_would_match_order(
+    current_ids: list[int],
+    target_ids_asc: list[int],
+    add_ids_asc: list[int],
+    remove_ids: set[int],
+) -> tuple[bool, str]:
+    """Return whether delta writes can produce the target QQ order.
+
+    QQ APIs are not explicit about whether playlist detail returns insertion
+    order or display order, so accept either orientation after applying the
+    planned delta:
+
+    - insertion order: old kept songs followed by newly added songs
+    - display order: newly added songs first, then old kept songs
+    """
+    current_after_remove = [qid for qid in current_ids if qid not in remove_ids]
+    target_ids_desc = list(reversed(target_ids_asc))
+
+    final_if_insertion_order = current_after_remove + add_ids_asc
+    if final_if_insertion_order == target_ids_asc:
+        return True, "order ok: insertion-asc"
+
+    final_if_display_order = list(reversed(add_ids_asc)) + current_after_remove
+    if final_if_display_order == target_ids_desc:
+        return True, "order ok: display-desc"
+
+    return False, "order drift: rebuild required"
+
+
+def _with_artist_aliases(
+    track: dict[str, Any],
+    qq: QQClient,
+    alias_client: MusicBrainzClient,
+) -> dict[str, Any]:
+    names = _artist_strings(track)
+    if not names:
+        return track
+
+    expanded: list[str] = []
+    seen: set[str] = set()
+    isrc = track.get("isrc") or ""
+    for name in names:
+        for alias in _qq_artist_aliases(name, qq):
+            key = normalize_artist(alias)
+            if not key or key in seen:
+                continue
+            expanded.append(alias)
+            seen.add(key)
+        try:
+            aliases = alias_client.get_aliases_for_isrc(str(isrc), name)
+        except Exception as exc:  # pragma: no cover — alias lookup is best-effort
+            _log(f"    ↻ 歌手别名查询失败 {name!r}: {exc}")
+            aliases = [name]
+        for alias in aliases:
+            key = normalize_artist(alias)
+            if not key or key in seen:
+                continue
+            expanded.append(alias)
+            seen.add(key)
+
+    if len(expanded) <= len(names):
+        return track
+    out = dict(track)
+    out["artists"] = expanded
+    return out
+
+
+def _qq_artist_aliases(name: str, qq: QQClient) -> list[str]:
+    try:
+        singers = qq.search_singers(name, num=5)
+    except Exception as exc:  # pragma: no cover — QQ singer search is best-effort
+        _log(f"    ↻ QQ 歌手别名搜索失败 {name!r}: {exc}")
+        return []
+
+    aliases: list[str] = []
+    for singer in singers:
+        for field in ("name", "title"):
+            aliases.extend(_split_artist_aliases(str(singer.get(field) or "")))
+    return aliases
+
+
+def _split_artist_aliases(value: str) -> list[str]:
+    value = value.strip()
+    if not value:
+        return []
+
+    out = [value]
+    for inner in re.findall(r"[\(（]([^()（）]+)[\)）]", value):
+        out.append(inner.strip())
+    stripped = re.sub(r"\s*[\(（][^()（）]+[\)）]\s*", " ", value).strip()
+    if stripped and stripped != value:
+        out.append(stripped)
+    return out
+
+
+def _fallback_title_queries(track: dict[str, Any]) -> list[str]:
+    title = (track.get("title") or track.get("name") or "").strip()
+    queries: list[str] = []
+
+    def add(value: str) -> None:
+        value = value.strip()
+        if value and value not in queries:
+            queries.append(value)
+
+    add(title)
+    normalized = normalize_title(title)
+    add(normalized)
+    for sep in (" - ", " – ", " — "):
+        if sep in title:
+            add(title.split(sep, 1)[0])
+    return queries
+
+
+def _track_with_title(track: dict[str, Any], title: str) -> dict[str, Any]:
+    if (track.get("title") or track.get("name") or "") == title:
+        return track
+    out = dict(track)
+    out["title"] = title
+    return out
+
+
+def _best_scored_candidate(
+    track: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, float, str]:
+    best_cand: dict[str, Any] | None = None
+    best_score = 0.0
+    best_method = "none"
+    for cand in candidates or []:
+        score, method = score_candidate(track, cand)
+        if best_cand is None or score > best_score:
+            best_cand = cand
+            best_score = score
+            best_method = method
+    return best_cand, best_score, best_method
+
+
 def _match_title_only_fallback(
     track: dict[str, Any],
     primary_candidates: list[dict[str, Any]],
     qq: QQClient,
+    alias_client: MusicBrainzClient,
 ) -> tuple[dict[str, Any] | None, float, str]:
-    """Try `title+artist` first; if < 0.8, retry with `title` alone.
-
-    QQ's own index already contains Chinese-artist versions for most English
-    Spotify artists. Re-searching with just the title surfaces those without
-    needing any external alias database. ISRC + duration carry the match once
-    the candidate set is broader.
-    """
+    """Try `title+artist` first; on weak match retry by title, but still require artist."""
     best, best_score, best_method = pick_best(track, primary_candidates, threshold=0.8)
     if best is not None and best_score >= 0.8:
         return best, best_score, best_method
 
-    overall_cand = best
-    overall_score = best_score
-    overall_method = best_method
+    overall_cand, overall_score, overall_method = _best_scored_candidate(
+        track, primary_candidates
+    )
+    if overall_score < best_score:
+        overall_score = best_score
+        overall_method = best_method
 
-    title = (track.get("title") or track.get("name") or "").strip()
-    if not title:
+    queries = _fallback_title_queries(track)
+    if not queries:
         return None, overall_score, overall_method
 
-    query = title
     _log(f"    ↻ 主搜索弱（最高 {int(overall_score * 100)}%），回退仅搜标题")
-    _log(f"    ↻ 搜索词: {query!r}")
-    try:
-        alt_cands = qq.search_song(query, num=10)
-    except Exception as exc:  # pragma: no cover — defensive
-        _log(f"    ↻ title-only 搜索失败: {exc}")
-        return (None if overall_score < 0.8 else overall_cand), overall_score, overall_method
+    alt_scored: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    best_score_track = track
+    for query in queries:
+        _log(f"    ↻ 搜索词: {query!r}")
+        try:
+            alt_cands = qq.search_song(query, num=10)
+        except Exception as exc:  # pragma: no cover — defensive
+            _log(f"    ↻ title-only 搜索失败: {exc}")
+            continue
 
-    for cand in alt_cands:
-        score, method = score_candidate(track, cand)
-        if score > overall_score:
-            overall_score = score
-            overall_method = f"title-only|{method}"
-            overall_cand = cand
-            if score >= 1.0:
+        score_track = _track_with_title(track, query)
+        for cand in alt_cands:
+            alt_scored.append((score_track, cand))
+            score, method = score_candidate(score_track, cand)
+            if overall_cand is None or score > overall_score:
+                overall_score = score
+                overall_method = f"title-only|{method}"
+                overall_cand = cand
+                best_score_track = score_track
+                if score >= 1.0:
+                    return overall_cand, overall_score, overall_method
+
+    if overall_cand is not None and is_confident_match(
+        best_score_track, overall_cand, overall_score
+    ):
+        return overall_cand, overall_score, overall_method
+
+    if overall_cand is not None and overall_score >= 0.8:
+        alias_cache: dict[int, dict[str, Any]] = {}
+
+        def aliased(score_track: dict[str, Any]) -> dict[str, Any]:
+            key = id(score_track)
+            if key not in alias_cache:
+                alias_cache[key] = _with_artist_aliases(score_track, qq, alias_client)
+            return alias_cache[key]
+
+        alias_track = aliased(best_score_track)
+        if alias_track is not best_score_track:
+            _log("    ↻ 标题/时长吻合但歌手不同，使用歌手别名再校验")
+            for score_track, cand in [(track, cand) for cand in primary_candidates] + alt_scored:
+                alias_score_track = aliased(score_track)
+                score, method = score_candidate(alias_score_track, cand)
+                if score > overall_score:
+                    prefix = "title-only|" if score_track is not track else ""
+                    overall_score = score
+                    overall_method = f"{prefix}{method}"
+                    overall_cand = cand
+                    alias_track = alias_score_track
+                    if score >= 1.0:
+                        break
+            if overall_cand is not None and is_confident_match(
+                alias_track, overall_cand, overall_score
+            ):
                 return overall_cand, overall_score, overall_method
 
-    if overall_cand is None or overall_score < 0.8:
-        return None, overall_score, overall_method
-    return overall_cand, overall_score, overall_method
+    return None, overall_score, overall_method
 
 
 def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
@@ -186,6 +428,10 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             )
         spotify_playlist_id = str(sp_playlist["id"])
         sp_tracks = sp.get_playlist_tracks(spotify_playlist_id)
+        # Sort ascending by added_at so newly-added tracks land last in QQ —
+        # i.e. show up at the top of QQ's "added time desc" view, matching
+        # the order the user sees on Spotify.
+        sp_tracks = sorted(sp_tracks, key=_added_at_sort_key)
         _log(f"      -> {len(sp_tracks)} tracks")
         notes_parts.append(f"spotify_count={len(sp_tracks)}")
         notes_parts.append(f"mode={mode}")
@@ -203,6 +449,7 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
         else:
             _log("      -> still valid")
         qq = QQClient(credential)
+        alias_client = MusicBrainzClient(cfg.musicbrainz_user_agent, conn)
 
         _log(f"[3/9] resolving QQ playlist {cfg.qq_playlist_name!r}...")
         target = qq.find_or_create_playlist(cfg.qq_playlist_name)
@@ -217,10 +464,12 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
         )
         _log(
             f"      -> to_search {len(plan.to_search)}, reused {len(plan.reused_matched)}, "
+            f"skipped-unmatched {len(plan.skipped_unmatched)}, "
             f"snapshot-removed {len(plan.to_remove_from_qq)}"
         )
         notes_parts.append(
             f"incremental: search={len(plan.to_search)} reused={len(plan.reused_matched)} "
+            f"skipped_unmatched={len(plan.skipped_unmatched)} "
             f"snap_del={len(plan.to_remove_from_qq)}"
         )
 
@@ -260,7 +509,9 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
                 )
                 continue
 
-            best, score, method = _match_title_only_fallback(track, candidates, qq)
+            best, score, method = _match_title_only_fallback(
+                track, candidates, qq, alias_client
+            )
             pct = int(round(score * 100))
             reason_cn = explain_method(method)
 
@@ -310,13 +561,16 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             f"本次搜到 {searched - len(unmatched_rows) - failed_count}), 未匹配 {len(unmatched_rows)}"
         )
 
-        _log("[6/9] computing mirror diff...")
-        target_qq_ids = {pair[0] for _, pair in matched}
-        current_qq_ids = {int(s["id"]) for s in qq_current if s.get("id") is not None}
-        diff = compute_mirror_diff(target_qq_ids, current_qq_ids)
-        safe, safety_msg = safety_check(diff, len(current_qq_ids), cfg.mirror_delete_threshold)
+        ordered_target_pairs = _ordered_unique_pairs(sp_tracks, matched)
 
-        to_add_pairs = [pair for _, pair in matched if pair[0] in diff["to_add"]]
+        _log("[6/9] computing mirror diff...")
+        target_qq_ids = {pair[0] for pair in ordered_target_pairs}
+        current_order_ids = _qq_current_ids(qq_current)
+        current_qq_ids = set(current_order_ids)
+        diff = compute_mirror_diff(target_qq_ids, current_qq_ids)
+        safe, diff_safety_msg = safety_check(diff, len(current_qq_ids), cfg.mirror_delete_threshold)
+
+        to_add_pairs = [pair for pair in ordered_target_pairs if pair[0] in diff["to_add"]]
         # For removal we fuse snapshot-driven removals with mirror-diff removals.
         qq_id_to_type = {
             int(s["id"]): int(s.get("type") or 0)
@@ -334,47 +588,136 @@ def run_sync(cfg: Config, dry_run: bool = False, full: bool = False) -> int:
             to_remove_pairs.append(pair)
             seen_rm_ids.add(pair[0])
 
+        target_ids_asc = [pair[0] for pair in ordered_target_pairs]
+        add_ids_asc = [pair[0] for pair in to_add_pairs]
+        remove_ids = {pair[0] for pair in to_remove_pairs}
+        order_ok, order_msg = _incremental_would_match_order(
+            current_order_ids, target_ids_asc, add_ids_asc, remove_ids
+        )
+        write_mode = "incremental" if order_ok else "rebuild"
+
+        if not order_ok and qq_current:
+            rebuild_loss = max(0, len(qq_current) - len(ordered_target_pairs))
+            rebuild_ratio = rebuild_loss / max(1, len(qq_current))
+            rebuild_safe = rebuild_ratio <= cfg.mirror_delete_threshold
+            rebuild_safety_msg = (
+                f"rebuild loss {rebuild_loss}/{len(qq_current)} "
+                f"({rebuild_ratio:.2%} <= {cfg.mirror_delete_threshold:.2%})"
+                if rebuild_safe
+                else (
+                    f"rebuild threshold exceeded: would lose "
+                    f"{rebuild_loss}/{len(qq_current)} "
+                    f"({rebuild_ratio:.2%} > {cfg.mirror_delete_threshold:.2%})"
+                )
+            )
+            safe = safe and rebuild_safe
+        elif not order_ok:
+            rebuild_safety_msg = "first-sync rebuild bypass"
+        else:
+            rebuild_safety_msg = order_msg
+
         _log(
             f"      -> add {len(to_add_pairs)}, remove {len(to_remove_pairs)} "
-            f"(safety: {safety_msg})"
+            f"(mode: {write_mode}; safety: {diff_safety_msg}; {rebuild_safety_msg})"
         )
-        notes_parts.append(f"safety={safety_msg}")
+        notes_parts.append(
+            f"write_mode={write_mode}; safety={diff_safety_msg}; {rebuild_safety_msg}"
+        )
 
         skipped_count += len(unmatched_rows)
+        skipped_count += len(plan.skipped_unmatched)
 
         if dry_run:
             _log("[7/9] DRY RUN — skipping writes")
-            notes_parts.append(
-                f"dry_run: would add {len(to_add_pairs)}, remove {len(to_remove_pairs)}"
-            )
-            added_count = len(to_add_pairs)
-            removed_count = len(to_remove_pairs)
+            if write_mode == "rebuild":
+                notes_parts.append(
+                    f"dry_run: would rebuild delete={len(qq_current)} "
+                    f"add={len(ordered_target_pairs)}"
+                )
+                added_count = len(ordered_target_pairs)
+                removed_count = len(qq_current)
+            else:
+                notes_parts.append(
+                    f"dry_run: would delete={len(to_remove_pairs)} "
+                    f"add={len(to_add_pairs)}"
+                )
+                added_count = len(to_add_pairs)
+                removed_count = len(to_remove_pairs)
             status = "dry-run"
         elif not safe:
             _log("[7/9] ABORT — safety threshold exceeded")
             notes_parts.append("aborted: safety threshold exceeded")
             status = "aborted"
         else:
-            if to_add_pairs:
-                _log(f"[7/9] adding {len(to_add_pairs)} songs to QQ playlist...")
-                ok = qq.add_songs(dirid, to_add_pairs)
-                if ok:
-                    added_count = len(to_add_pairs)
-                    _log(f"      -> added {added_count}")
-                else:
-                    failed_count += len(to_add_pairs)
-                    _log(f"      -> FAILED: add_songs returned non-success")
-                    notes_parts.append("add_songs returned non-success")
-            if to_remove_pairs:
-                _log(f"      removing {len(to_remove_pairs)} songs from QQ playlist...")
-                ok = qq.del_songs(dirid, to_remove_pairs)
-                if ok:
-                    removed_count = len(to_remove_pairs)
-                    _log(f"      -> removed {removed_count}")
-                else:
-                    failed_count += len(to_remove_pairs)
-                    _log(f"      -> FAILED: del_songs returned non-success")
-                    notes_parts.append("del_songs returned non-success")
+            if write_mode == "rebuild":
+                current_pairs = [
+                    pair
+                    for song in qq_current
+                    if (pair := _qq_pair_from_song(song)) is not None
+                ]
+                if current_pairs:
+                    _log(
+                        f"[7/9] order drift detected: deleting "
+                        f"{len(current_pairs)} current QQ song(s)..."
+                    )
+                    ok = qq.del_songs(dirid, current_pairs)
+                    if ok:
+                        removed_count = len(current_pairs)
+                        _log(f"      -> deleted {removed_count}")
+                    else:
+                        failed_count += len(current_pairs)
+                        _log("      -> FAILED: del_songs returned non-success")
+                        notes_parts.append("del_songs returned non-success")
+                if not failed_count and ordered_target_pairs:
+                    _log(
+                        f"      adding {len(ordered_target_pairs)} song(s) "
+                        f"in Spotify added_at order..."
+                    )
+                    ok = qq.add_songs(dirid, ordered_target_pairs)
+                    if ok:
+                        added_count = len(ordered_target_pairs)
+                        _log(f"      -> added {added_count}")
+                    else:
+                        failed_count += len(ordered_target_pairs)
+                        _log("      -> FAILED: add_songs returned non-success")
+                        notes_parts.append("add_songs returned non-success")
+                notes_parts.append(
+                    f"rebuild: deleted={removed_count} added={added_count} "
+                    f"target_order={len(ordered_target_pairs)}"
+                )
+            else:
+                if to_remove_pairs:
+                    _log(
+                        f"[7/9] applying incremental delete: "
+                        f"{len(to_remove_pairs)} song(s)..."
+                    )
+                    ok = qq.del_songs(dirid, to_remove_pairs)
+                    if ok:
+                        removed_count = len(to_remove_pairs)
+                        _log(f"      -> deleted {removed_count}")
+                    else:
+                        failed_count += len(to_remove_pairs)
+                        _log("      -> FAILED: del_songs returned non-success")
+                        notes_parts.append("del_songs returned non-success")
+                if not failed_count and to_add_pairs:
+                    _log(
+                        f"[7/9] applying incremental add: "
+                        f"{len(to_add_pairs)} song(s) in Spotify added_at order..."
+                    )
+                    ok = qq.add_songs(dirid, to_add_pairs)
+                    if ok:
+                        added_count = len(to_add_pairs)
+                        _log(f"      -> added {added_count}")
+                    else:
+                        failed_count += len(to_add_pairs)
+                        _log("      -> FAILED: add_songs returned non-success")
+                        notes_parts.append("add_songs returned non-success")
+                if not to_remove_pairs and not to_add_pairs:
+                    _log("[7/9] no QQ writes needed")
+                notes_parts.append(
+                    f"incremental_apply: deleted={removed_count} "
+                    f"added={added_count}"
+                )
             status = "failed" if failed_count else "success"
 
             if status == "success":

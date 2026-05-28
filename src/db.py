@@ -234,6 +234,22 @@ def insert_unmatched(
     return len(payload)
 
 
+def unmatched_get_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> set[str]:
+    ids = [str(i) for i in ids if i is not None]
+    if not ids:
+        return set()
+    placeholders = ",".join("?" * len(ids))
+    cur = conn.execute(
+        f"""
+        SELECT DISTINCT spotify_track_id
+          FROM unmatched_tracks
+         WHERE spotify_track_id IN ({placeholders})
+        """,
+        ids,
+    )
+    return {str(row["spotify_track_id"]) for row in cur.fetchall()}
+
+
 # ---------- artist_alias_cache ----------
 
 

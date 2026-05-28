@@ -89,6 +89,7 @@ def test_get_playlist_tracks_skips_none_and_normalizes(mock_post, mock_get):
         "items": [
             {"track": None},  # local file — skip
             {
+                "added_at": "2024-01-15T10:30:00Z",
                 "track": {
                     "id": "t1",
                     "name": "Song A",
@@ -96,9 +97,10 @@ def test_get_playlist_tracks_skips_none_and_normalizes(mock_post, mock_get):
                     "artists": [{"name": "Alice"}, {"name": "Bob"}],
                     "album": {"name": "Alb"},
                     "external_ids": {"isrc": "USAA1234567"},
-                }
+                },
             },
             {
+                "added_at": "2024-02-20T12:00:00Z",
                 "track": {
                     "id": "t2",
                     "name": "Song B",
@@ -106,7 +108,7 @@ def test_get_playlist_tracks_skips_none_and_normalizes(mock_post, mock_get):
                     "artists": [{"name": "Solo"}],
                     "album": {"name": "AlbB"},
                     "external_ids": {},
-                }
+                },
             },
         ],
         "next": None,
@@ -124,12 +126,15 @@ def test_get_playlist_tracks_skips_none_and_normalizes(mock_post, mock_get):
         "album": "Alb",
         "duration_ms": 200000,
         "isrc": "USAA1234567",
+        "added_at": "2024-01-15T10:30:00Z",
     }
     assert tracks[1]["isrc"] is None
+    assert tracks[1]["added_at"] == "2024-02-20T12:00:00Z"
     # Correct fields param on first request
     _, kwargs = mock_get.call_args_list[0]
     assert "external_ids(isrc)" in kwargs["params"]["fields"]
     assert "items(" in kwargs["params"]["fields"]
+    assert "added_at" in kwargs["params"]["fields"]
 
 
 @patch("src.spotify_client.time.sleep")
@@ -178,3 +183,12 @@ def test_normalize_track_handles_missing_fields():
     assert out["album"] == ""
     assert out["isrc"] is None
     assert out["duration_ms"] == 0
+    assert out["added_at"] is None
+
+
+def test_normalize_track_carries_added_at():
+    out = _normalize_track(
+        {"id": "x", "name": "T", "artists": [], "album": None, "external_ids": None},
+        added_at="2024-05-07T01:02:03Z",
+    )
+    assert out["added_at"] == "2024-05-07T01:02:03Z"

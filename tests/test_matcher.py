@@ -22,6 +22,7 @@ if ROOT not in sys.path:
 import unittest
 
 from src.matcher import (
+    is_confident_match,
     normalize_artist,
     normalize_title,
     pick_best,
@@ -253,12 +254,23 @@ class TestScore(unittest.TestCase):
         self.assertAlmostEqual(s, 0.6)
 
     def test_title_plus_duration(self):
-        # Plan A: title + duration alone is enough to clear 0.8 threshold.
+        # Raw score stays visible for diagnostics, but confidence gating
+        # rejects this unless artist or ISRC also matches.
         s, _ = score_candidate(
             {"name": "A", "artists": [{"name": "X"}], "duration_ms": 200000},
             {"name": "A", "singer": [{"name": "Z"}], "interval": 200},
         )
         self.assertAlmostEqual(s, 0.8)
+
+    def test_title_plus_duration_wrong_artist_not_confident(self):
+        sp_track = {"name": "A", "artists": [{"name": "X"}], "duration_ms": 200000}
+        qq_track = {"name": "A", "singer": [{"name": "Z"}], "interval": 200}
+        s, _ = score_candidate(sp_track, qq_track)
+        self.assertFalse(is_confident_match(sp_track, qq_track, s))
+        picked, score, method = pick_best(sp_track, [qq_track])
+        self.assertIsNone(picked)
+        self.assertAlmostEqual(score, 0.8)
+        self.assertEqual(method, "title+duration")
 
     def test_duration_only_below_threshold(self):
         # Plan A safety check: duration alone is 0.4, still filtered.

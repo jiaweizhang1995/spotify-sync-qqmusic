@@ -191,6 +191,36 @@ def test_search_song_normalizes_and_passes_song_type():
     assert kwargs["num"] == 5
 
 
+def test_search_singers_normalizes_and_passes_singer_type():
+    cred = _make_credential()
+    singer = SimpleNamespace(
+        id=200,
+        mid="s200",
+        name="方大同 (Khalil Fong)",
+        title="方大同 (Khalil Fong)",
+    )
+    resp = SimpleNamespace(singer=[singer])
+    client = _make_client_mock()
+    client.search.search_by_type = AsyncMock(return_value=resp)
+
+    with patch.object(qc, "Client", return_value=client):
+        qq = qc.QQClient(cred)
+        out = qq.search_singers("Khalil Fong", num=3)
+
+    assert out == [
+        {
+            "id": 200,
+            "mid": "s200",
+            "name": "方大同 (Khalil Fong)",
+            "title": "方大同 (Khalil Fong)",
+        }
+    ]
+    _, kwargs = client.search.search_by_type.call_args
+    assert kwargs["keyword"] == "Khalil Fong"
+    assert kwargs["num"] == 3
+    assert kwargs["search_type"] == qc.SearchType.SINGER
+
+
 def test_add_songs_batches_in_30s():
     cred = _make_credential()
     client = _make_client_mock()

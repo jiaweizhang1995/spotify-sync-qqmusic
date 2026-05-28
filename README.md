@@ -1,7 +1,7 @@
 # Spotify → QQ 音乐 每日同步 · Daily Sync
 
-把 Spotify 歌单单向镜像到 QQ 音乐同名歌单：每天增量跑；跨语种歌手（Jay Chou ↔ 周杰伦）靠 QQ 自家的 title-only 兜底搜。
-One-way mirror from a Spotify playlist to the same-named QQ Music playlist — runs daily; cross-language artists are bridged by a title-only fallback against QQ's own catalog.
+把 Spotify 歌单单向镜像到 QQ 音乐同名歌单：每天增量跑；匹配必须有歌手证据；QQ 侧保持 Spotify 加入时间顺序。
+One-way mirror from a Spotify playlist to the same-named QQ Music playlist — runs daily; matches require artist evidence; QQ keeps Spotify added-time order.
 
 ## 流程 · Flow
 
@@ -20,7 +20,7 @@ flowchart TD
     I --> K{score ≥ 0.8?}
     K -->|Yes| J
     K -->|No| L[unmatched.txt]
-    J --> M[add_songs to QQ]
+    J --> M[incremental add/delete in added_at asc]
     M --> N[Commit snapshot]
     N --> O[Daily GitHub Actions cron]
     O --> A
@@ -84,6 +84,7 @@ spotify-sync                       # 默认 = sync (增量)
 spotify-sync sync --dry-run        # 预览，不写 QQ
 spotify-sync sync --full           # 全量重搜，绕过 snapshot
 spotify-sync sync --full --dry-run
+spotify-sync reorder --dry-run     # 只预览顺序重建
 ```
 
 没装 wrapper 时全用 `uv run`：
@@ -91,7 +92,7 @@ spotify-sync sync --full --dry-run
 ```bash
 uv run spotify-sync                 # 同上
 uv run spotify-sync sync --dry-run
-uv run pytest tests/ -q             # 跑测试 / 94 cases
+uv run pytest tests/ -q             # 跑测试 / 117 cases
 make test                           # 快捷方式
 ```
 
@@ -101,20 +102,22 @@ make test                           # 快捷方式
 
 | 模式 Mode | 何时用 When |
 |---|---|
-| 增量 (默认) / Incremental | 每日自动跑。只搜 Spotify 新加的歌，删除 Spotify 移除的歌。命中缓存零 API 调用。 |
-| `--full` | 缓存漂移、手动改了 QQ 侧、或 Matcher 调参后想重新评估全量。 |
+| 增量 (默认) / Incremental | 每日自动跑。只搜 Spotify 新加且从未处理过的歌，删除 Spotify 移除的歌。命中缓存或历史未匹配都零 API 调用。 |
+| `--full` | 缓存漂移、手动改了 QQ 侧、想重试历史未匹配、或 Matcher 调参后想重新评估全量。 |
 
-增量靠 `playlist_snapshot` 表记录上次成功同步后的 Spotify track id 集合；下次对比得出 `added / kept / removed`。只有 `added` 走 QQ 搜索；`kept` 直接复用 `track_map_cache` 里的 QQ 映射；`removed` 用缓存映射反查 QQ id 直接删。
+增量靠 `playlist_snapshot` 表记录上次成功同步后的 Spotify track id 集合；下次对比得出 `added / kept / removed`。只有新且未知的 track 走 QQ 搜索；命中过 `track_map_cache` 的直接复用 QQ 映射；命中过 `unmatched_tracks` 的默认跳过不重试；`removed` 用缓存映射反查 QQ id。
+
+日常同步只做差量删除/新增；新增会按 Spotify `added_at` 升序写入 QQ。QQ 音乐按“添加时间倒序”显示时，最上面就是 Spotify 最新加入的歌。只有检测到 QQ 侧顺序已经漂移、差量写入无法修正时，才会触发安全阀保护下的顺序重建。
 
 ## Title-only 兜底 · Fallback
 
-主搜 `title + artist`；若打不到 0.8 分，再搜一次 `title` 本身。QQ 自家库就有中文艺人版本，靠 duration / ISRC 挑对。
+主搜 `title + artist`；若打不到 0.8 分，再搜一次 `title` 本身。候选除非 ISRC 完全一致，否则必须有歌手重叠；跨语种歌手用 MusicBrainz 别名做最后校验。
 
-- 零外部 API 依赖
 - 每次 miss 多一次 QQ 搜索 (~0.5 秒)
-- 覆盖率 ≈ MusicBrainz 别名，速度快 3 倍
+- 别名查询有 SQLite 缓存，并按 MusicBrainz 1 req/s 限速
+- `title + duration` 但歌手不一致会进 `unmatched.txt`，不会自动同步错歌手版本
 
-Primary search is `title + artist`. On miss (<0.8), retry with just `title`; QQ's own index already holds Chinese-artist versions, so ISRC + duration carry the match. No external alias API — ~3x faster than the prior MusicBrainz path.
+Primary search is `title + artist`. On miss (<0.8), retry with just `title`; unless ISRC matches exactly, the selected candidate must also match an artist name or alias.
 
 ## Matcher 评分 · Scoring
 
@@ -125,7 +128,7 @@ Primary search is `title + artist`. On miss (<0.8), retry with just `title`; QQ'
 | 主艺人命中 (集合交集) | `0.2` |
 | 时长 ±3s | `0.4` |
 
-阈值 `0.8`。`title + duration`（跨语种艺人常见）刚好过线；仅 `duration` (0.4) 会被过滤。
+阈值 `0.8`，并且除 ISRC 完全一致外还要求歌手命中。`title + duration` 的原始分数仍是 0.8，但如果歌手不匹配会被拒绝。
 
 ## .env 字段
 
@@ -147,7 +150,7 @@ Primary search is `title + artist`. On miss (<0.8), retry with just `title`; QQ'
 - `QQ_CREDENTIAL_JSON`
 - `GH_PAT_SECRETS_WRITE`（可选）
 
-配好后每天 UTC 19:00（北京 03:00）自动跑；Actions 页面手点 `Run workflow` 可触发 dry-run 或 full 模式。
+配好后每天 UTC 11:00（北京 19:00）自动跑；Actions 页面手点 `Run workflow` 可触发 dry-run。
 CI 使用 `uv sync --frozen` 严格按 `uv.lock` 装依赖 → 本地和线上版本完全一致。
 产物：`data/` 分支自动 commit 回 SQLite + 日志；`sync.log` + `unmatched.txt` 作 30 天 artifact。
 
@@ -156,7 +159,7 @@ CI 使用 `uv sync --frozen` 严格按 `uv.lock` 装依赖 → 本地和线上�
 - **QQ 扫码时手机在哪点？** 打开 **手机 QQ**（聊天那个） → 扫一扫。不是 QQ 音乐 App。QQ 音乐账号用 QQ 账号授权。
 - **Spotify redirect_uri 报错？** Spotify 控制台里的 Redirect URI 必须精确等于 `http://127.0.0.1:8765/callback`，末尾不要加斜杠。
 - **`unmatched.txt` 空的？** 好事 — 说明全匹配上了。
-- **有首歌没过？** 打开 `data/unmatched.txt`，跨平台 metadata 常年对不上是常态；人工加一下就好。
+- **有首歌没过？** 打开 `data/unmatched.txt`，跨平台 metadata 常年对不上是常态；默认增量不会反复重试这些歌。想重试就跑 `spotify-sync sync --full`。
 - **QQ 登录态过期？** 重跑 `make bootstrap-qq`，把新 `QQ_CREDENTIAL_JSON` 更新到 `.env` 或 Repository Secret。如果配了 `GH_PAT_SECRETS_WRITE`，Actions 里 musickey 刷新会自动写回。
 - **想重置增量？** 删 `data/sync.db` 里的 `playlist_snapshot` 表，或直接跑 `--full` 一次。
 
@@ -174,11 +177,12 @@ src/
   matcher.py             # 归一化 + 打分
   incremental.py         # Snapshot 增量 plan
   diff_engine.py         # Mirror diff + 安全阀
-  sync_service.py        # 主流程 orchestrator（含 title-only 兜底）
+  sync_service.py        # 主流程 orchestrator（含歌手强校验 + 顺序重建）
+  reorder_service.py     # 只做 QQ 顺序重建
   db.py                  # SQLite schema + DAO
   report.py              # 同步报告 + 日志
 scripts/                 # bootstrap 脚本
-tests/                   # pytest, 94 cases
+tests/                   # pytest, 117 cases
 data/                    # 运行产物: sync.db / sync.log / unmatched.txt
 ```
 
