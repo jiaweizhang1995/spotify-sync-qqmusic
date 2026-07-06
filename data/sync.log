@@ -1,0 +1,207 @@
+=== sync run @ 2026-04-24T09:36:05Z ===
+run_id: 1
+status: dry-run
+added_count: 25
+removed_count: 14
+skipped_count: 20
+failed_count: 0
+notes: spotify_count=263; mode=full; qq_count=232; incremental: search=263 reused=0 snap_del=0; safety=ok: remove 14/232 (6.03%); dry_run: would add 25, remove 14
+
+=== sync run @ 2026-04-24T10:13:47Z ===
+run_id: 2
+status: failed
+added_count: 0
+removed_count: 0
+skipped_count: 0
+failed_count: 1
+notes: exception: HTTPSConnectionPool(host='api.spotify.com', port=443): Max retries exceeded with url: /v1/playlists/2vmKbuP1FVcdin8jX6GZYA/items?offset=100&limit=100&fields=items(item(id,name,duration_ms,artists(name),album(name),external_ids(isrc))),next (Caused by SSLError(SSLEOFError(8, 'EOF occurred in violation of protocol (_ssl.c:2427)')))
+
+=== sync run @ 2026-04-24T10:16:45Z ===
+run_id: 3
+status: failed
+added_count: 0
+removed_count: 0
+skipped_count: 0
+failed_count: 1
+notes: spotify_count=263; mode=incremental; qq_count=232; incremental: search=263 reused=0 snap_del=0; exception: [Errno 32] Broken pipe
+
+=== sync run @ 2026-04-24T10:20:34Z ===
+run_id: 4
+status: dry-run
+added_count: 25
+removed_count: 14
+skipped_count: 20
+failed_count: 0
+notes: spotify_count=263; mode=incremental; qq_count=232; incremental: search=263 reused=0 snap_del=0; safety=ok: remove 14/232 (6.03%); dry_run: would add 25, remove 14
+
+=== sync run @ 2026-04-26T03:03:55Z ===
+run_id: 7
+status: dry-run
+added_count: 37
+removed_count: 15
+skipped_count: 22
+failed_count: 0
+notes: spotify_count=276; mode=incremental; qq_count=232; incremental: search=14 reused=242 skipped_unmatched=20 snap_del=0; safety=ok: remove 15/232 (6.47%); dry_run: would add 37, remove 15
+
+=== sync run @ 2026-04-26T03:04:50Z ===
+run_id: 8
+status: success
+added_count: 37
+removed_count: 15
+skipped_count: 22
+failed_count: 0
+notes: spotify_count=276; mode=incremental; qq_count=232; incremental: search=0 reused=254 skipped_unmatched=22 snap_del=0; safety=ok: remove 15/232 (6.47%)
+
+=== sync run @ 2026-05-07T14:43:10Z ===
+run_id: 9
+status: dry-run
+added_count: 253
+removed_count: 311
+skipped_count: 55
+failed_count: 0
+notes: op=reorder; spotify_count=309; qq_count=311; mapped=253 unmapped=55; safety=loss 18.6% vs threshold 20.0%; dry_run: would_delete=311 would_add=253
+
+=== sync run @ 2026-05-07T15:18:25Z ===
+run_id: 10
+status: success
+added_count: 4
+removed_count: 33
+skipped_count: 26
+failed_count: 0
+notes: spotify_count=309; mode=full; qq_count=311; incremental: search=309 reused=0 skipped_unmatched=0 snap_del=0; safety=ok: remove 33/311 (10.61%)
+
+=== sync run @ 2026-05-07T15:18:43Z ===
+run_id: 11
+status: dry-run
+added_count: 283
+removed_count: 315
+skipped_count: 25
+failed_count: 0
+notes: op=reorder; spotify_count=309; qq_count=315; mapped=283 unmapped=25; safety=loss 10.2% vs threshold 20.0%; dry_run: would_delete=315 would_add=283
+
+=== sync run @ 2026-05-07T15:19:07Z ===
+run_id: 12
+status: success
+added_count: 283
+removed_count: 315
+skipped_count: 25
+failed_count: 0
+notes: op=reorder; spotify_count=309; qq_count=315; mapped=283 unmapped=25; safety=loss 10.2% vs threshold 20.0%
+
+=== sync run @ 2026-05-28T17:17:09Z ===
+run_id: 13
+status: dry-run
+added_count: 306
+removed_count: 349
+skipped_count: 29
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=27 reused=283 skipped_unmatched=25 snap_del=0; safety=ok: remove 44/349 (12.61%); rebuild loss 43/349 (12.32% <= 20.00%); dry_run: would rebuild delete=349 add=306
+
+=== sync run @ 2026-05-28T17:26:07Z ===
+run_id: 14
+status: dry-run
+added_count: 266
+removed_count: 349
+skipped_count: 69
+failed_count: 0
+notes: spotify_count=336; mode=full; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=336 reused=0 skipped_unmatched=0 snap_del=0; safety=threshold exceeded: would remove 84/349 (24.07% > 20.00%); rebuild threshold exceeded: would lose 83/349 (23.78% > 20.00%); dry_run: would rebuild delete=349 add=266
+
+=== sync run @ 2026-05-28T17:28:13Z ===
+run_id: 15
+status: dry-run
+added_count: 269
+removed_count: 349
+skipped_count: 66
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=0 reused=269 skipped_unmatched=66 snap_del=0; safety=threshold exceeded: would remove 81/349 (23.21% > 20.00%); rebuild threshold exceeded: would lose 80/349 (22.92% > 20.00%); dry_run: would rebuild delete=349 add=269
+
+=== sync run @ 2026-05-28T17:36:40Z ===
+run_id: 16
+status: dry-run
+added_count: 296
+removed_count: 349
+skipped_count: 39
+failed_count: 0
+notes: spotify_count=336; mode=full; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=336 reused=0 skipped_unmatched=0 snap_del=0; safety=ok: remove 55/349 (15.76%); rebuild loss 53/349 (15.19% <= 20.00%); dry_run: would rebuild delete=349 add=296
+
+=== sync run @ 2026-05-28T17:39:22Z ===
+run_id: 17
+status: dry-run
+added_count: 298
+removed_count: 349
+skipped_count: 37
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=0 reused=298 skipped_unmatched=37 snap_del=0; safety=ok: remove 53/349 (15.19%); rebuild loss 51/349 (14.61% <= 20.00%); dry_run: would rebuild delete=349 add=298
+
+=== sync run @ 2026-05-28T17:47:49Z ===
+run_id: 18
+status: success
+added_count: 304
+removed_count: 349
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=full; qq_credential_rotated=local-only (no PAT configured); qq_count=349; incremental: search=336 reused=0 skipped_unmatched=0 snap_del=0; safety=ok: remove 53/349 (15.19%); rebuild loss 45/349 (12.89% <= 20.00%); rebuild: deleted=349 added=304 target_order=304
+
+=== sync run @ 2026-05-28T17:48:10Z ===
+run_id: 19
+status: dry-run
+added_count: 304
+removed_count: 357
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=357; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 53/357 (14.85%); rebuild loss 53/357 (14.85% <= 20.00%); dry_run: would rebuild delete=357 add=304
+
+=== sync run @ 2026-05-28T17:49:54Z ===
+run_id: 20
+status: dry-run
+added_count: 304
+removed_count: 357
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=357; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 53/357 (14.85%); rebuild loss 53/357 (14.85% <= 20.00%); dry_run: would rebuild delete=357 add=304
+
+=== sync run @ 2026-05-28T17:51:36Z ===
+run_id: 21
+status: dry-run
+added_count: 304
+removed_count: 314
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=314; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 10/314 (3.18%); rebuild loss 10/314 (3.18% <= 20.00%); dry_run: would rebuild delete=314 add=304
+
+=== sync run @ 2026-05-28T17:52:06Z ===
+run_id: 22
+status: success
+added_count: 304
+removed_count: 314
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=314; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 10/314 (3.18%); rebuild loss 10/314 (3.18% <= 20.00%); rebuild: deleted=314 added=304 target_order=304
+
+=== sync run @ 2026-05-28T17:52:30Z ===
+run_id: 23
+status: dry-run
+added_count: 304
+removed_count: 304
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=304; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 0/304 (0.00%); rebuild loss 0/304 (0.00% <= 20.00%); dry_run: would rebuild delete=304 add=304
+
+=== sync run @ 2026-05-28T17:54:01Z ===
+run_id: 24
+status: dry-run
+added_count: 304
+removed_count: 304
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=304; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; safety=ok: remove 0/304 (0.00%); rebuild loss 0/304 (0.00% <= 20.00%); dry_run: would rebuild delete=304 add=304
+
+=== sync run @ 2026-05-28T18:08:30Z ===
+run_id: 25
+status: dry-run
+added_count: 0
+removed_count: 0
+skipped_count: 31
+failed_count: 0
+notes: spotify_count=336; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=304; incremental: search=0 reused=304 skipped_unmatched=31 snap_del=0; write_mode=incremental; safety=ok: remove 0/304 (0.00%); order ok: display-desc; dry_run: would delete=0 add=0
+
