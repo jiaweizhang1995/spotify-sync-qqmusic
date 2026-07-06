@@ -32,6 +32,8 @@ jobs:
       - name: Switch to data branch
         run: |
           set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           default_sha="$(git rev-parse HEAD)"
 
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
@@ -74,8 +76,6 @@ jobs:
         if: success() && inputs.dry_run != true
         run: |
           set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f data/sync.db data/sync.log data/unmatched.txt
           if git diff --cached --quiet; then
             echo "No data/ changes to commit."
