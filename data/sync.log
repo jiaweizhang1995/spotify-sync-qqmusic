@@ -655,3 +655,12 @@ skipped_count: 39
 failed_count: 0
 notes: spotify_count=409; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=369; incremental: search=0 reused=369 skipped_unmatched=39 snap_del=0; write_mode=incremental; safety=ok: remove 0/369 (0.00%); order ok: display-desc; incremental_apply: deleted=0 added=0
 
+=== sync run @ 2026-08-23T22:19:37Z ===
+run_id: 76
+status: success
+added_count: 0
+removed_count: 1
+skipped_count: 39
+failed_count: 0
+notes: spotify_count=410; mode=incremental; qq_credential_rotated=local-only (no PAT configured); qq_count=371; incremental: search=1 reused=369 skipped_unmatched=39 snap_del=0; write_mode=incremental; safety=ok: remove 1/371 (0.27%); order ok: display-desc; incremental_apply: deleted=1 added=0
+
